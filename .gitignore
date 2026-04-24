@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.pdb
+*.egg-info/
+*.egg
+.venv/
+venv/
+ENV/
+env/
+.env
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Node / Chrome extension artifacts
+node_modules/
+*.log
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+*~
+
+# Python packaging
+build/
+dist/
+.eggs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS generated files
+Thumbs.db
+desktop.ini

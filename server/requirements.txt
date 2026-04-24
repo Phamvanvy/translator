@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+paddleocr
+opencv-python-headless
+numpy
+pillow
+requests
+pyautogui

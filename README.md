@@ -19,6 +19,14 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
+> Nếu server báo lỗi thiếu `paddlepaddle`, hãy cài thủ công:
+>
+> ```powershell
+> pip install paddlepaddle
+> ```
+>
+> Trên Windows, nếu cài trực tiếp bị lỗi, xem hướng dẫn cài `paddlepaddle` chính thức từ trang PaddlePaddle.
+
 2. Chạy server:
 
 ```powershell
@@ -30,6 +38,8 @@ uvicorn main:app --reload
 ```powershell
 python sample_scan.py --lang japan
 python sample_scan.py --lang korean
+python sample_scan.py --lang en
+python sample_scan.py --lang ch
 ```
 
 Hoặc đặt biến môi trường:
@@ -41,7 +51,9 @@ uvicorn main:app --reload
 
 4. Cài extension Chrome từ thư mục `extension`.
 
-4. Bật Auto-scan bằng `Alt+S`.
+5. Nếu muốn chọn vùng cụ thể, nhấn nút `Chọn vùng quét` trong extension rồi kéo thả vùng mong muốn.
+
+6. Bật Auto-scan bằng `Alt+S`.
 
 ## Notes
 

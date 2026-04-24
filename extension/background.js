@@ -22,12 +22,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return;
     }
 
-    chrome.tabs.captureVisibleTab(tabs[0].windowId, { format: "png" }, (dataUrl) => {
+    chrome.tabs.captureVisibleTab(null, { format: "png" }, (dataUrl) => {
       if (chrome.runtime.lastError || !dataUrl) {
         sendResponse({ error: chrome.runtime.lastError?.message || "Failed to capture tab." });
         return;
       }
-      sendResponse({ dataUrl });
+      sendResponse({ dataUrl, tabId: tabs[0].id });
     });
   });
 

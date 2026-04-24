@@ -1,0 +1,22 @@
+# Cursor / AI Workspace Rules
+
+- Primary context source: `.context.md`
+- Project skeleton source: `project_skeleton.txt`
+- When opening files in this repo, load `.context.md` first, then `project_skeleton.txt`, then the specific file(s) being edited.
+
+## Usage
+- Use `.context.md` to understand project goals, architecture, data flow, and naming conventions.
+- Use `project_skeleton.txt` to locate file responsibilities and function/class signatures quickly.
+- Avoid sending all file bodies until you are working on a specific fix.
+
+## Project Memory
+This project is a local manga translation tool with:
+- Chrome Extension frontend (`extension/`)
+- Python FastAPI backend (`server/`)
+- OCR via PaddleOCR
+- Translation via Ollama local model
+
+## AI Prompt Cache Strategy
+1. Read `.context.md` for the overall system.
+2. Read `project_skeleton.txt` for code structure.
+3. When editing, include only the affected file sections and mention the relevant entry from the skeleton.

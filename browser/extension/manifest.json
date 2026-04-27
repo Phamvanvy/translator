@@ -1,0 +1,53 @@
+{
+  "manifest_version": 3,
+  "name": "Manga AutoScan Translator (Browser)",
+  "version": "0.1.0",
+  "description": "Auto-scan manga images and translate in-browser with LMStudio, using local OCR for text extraction.",
+  "permissions": ["activeTab", "scripting", "tabs", "storage", "commands"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "icon.svg",
+    "48": "icon.svg",
+    "128": "icon.svg"
+  },
+  "action": {
+    "default_title": "Manga AutoScan",
+    "default_icon": {
+      "16": "icon.svg",
+      "48": "icon.svg",
+      "128": "icon.svg"
+    }
+  },
+  "commands": {
+    "toggle-auto-scan": {
+      "suggested_key": {
+        "default": "Alt+S",
+        "mac": "Alt+S"
+      },
+      "description": "Toggle Auto-scan"
+    },
+    "capture-now": {
+      "suggested_key": {
+        "default": "Alt+Shift+S",
+        "mac": "Alt+Shift+S"
+      },
+      "description": "Capture current image now"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["overlay.css"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

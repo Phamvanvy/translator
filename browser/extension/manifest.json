@@ -40,13 +40,13 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "js": ["tesseract/tesseract.min.js", "content.js"],
       "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["overlay.css"],
+      "resources": ["overlay.css", "tesseract/worker.min.js", "tesseract/tesseract-core.wasm.js", "tesseract/tesseract-core.wasm", "tesseract/chi_sim.traineddata", "tesseract/eng.traineddata", "tesseract/jpn.traineddata"],
       "matches": ["<all_urls>"]
     }
   ]

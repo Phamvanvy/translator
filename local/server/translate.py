@@ -16,22 +16,21 @@ LMSTUDIO_TIMEOUT = int(os.getenv("LMSTUDIO_TIMEOUT", os.getenv("OLLAMA_TIMEOUT",
 
 SYSTEM_PROMPT_BASE = (
     "You are a professional manga translator. "
-    "Translate the texts below from the source language into Vietnamese. "
-    "Tone: Casual, honorifics included. "
-    "Preserve character names and formatting as much as possible. "
-    "Do not add extra explanation or commentary. "
-    "Return only the translated text for each input line."
+    "Translate the given Japanese text into natural Vietnamese. "
+    "Preserve tone, character names, and formatting. "
+    "Do not add explanations, commentary, or extra text. "
+    "Return only the translated content in the requested format."
 )
 
 
 def build_prompt(lines: List[str], glossary: Optional[Dict[str, str]] = None, character_names: Optional[List[str]] = None) -> str:
-    prompt = [SYSTEM_PROMPT_BASE]
+    prompt: List[str] = []
     if character_names:
         prompt.append(f"Character names: {', '.join(character_names)}.")
     if glossary:
         entries = ", ".join([f'"{k}" -> "{v}"' for k, v in glossary.items()])
         prompt.append(f"Use this glossary when translating: {entries}.")
-    prompt.append("Translate these lines:")
+    prompt.append("Translate these lines from Japanese into Vietnamese.")
     for idx, line in enumerate(lines, start=1):
         prompt.append(f"{idx}. {line}")
     prompt.append("Return the translated lines as a JSON array of strings in the same order.")
@@ -52,6 +51,21 @@ def parse_response(response_text: str, count: int) -> List[str]:
         return fallback
 
     return [trimmed]
+
+
+def extract_content_from_response(data: dict, endpoint: str) -> str:
+    if not data:
+        raise ValueError(f"Empty response from {endpoint}")
+    if "choices" in data and data["choices"]:
+        choice = data["choices"][0]
+        return choice.get("message", {}).get("content") or choice.get("text") or ""
+    if "output_text" in data:
+        return data["output_text"]
+    if "response" in data:
+        return data["response"]
+    if "text" in data and isinstance(data["text"], str):
+        return data["text"]
+    raise ValueError(f"Unexpected LMStudio/Qwen response format from {endpoint}: {data}")
 
 
 TRANSLATION_MEMORY: Dict[str, str] = {}
@@ -97,6 +111,14 @@ def translate_text_blocks(lines: List[str], glossary: Optional[Dict[str, str]] =
             "top_p": 0.9,
         }
 
+        qwen_payload = {
+            "model": LMSTUDIO_MODEL,
+            "system_prompt": SYSTEM_PROMPT_BASE,
+            "input": build_prompt(missing_lines, glossary, character_names),
+            "temperature": 0.2,
+            "top_p": 0.9,
+        }
+
         text_payload = {
             "model": LMSTUDIO_MODEL,
             "prompt": build_prompt(missing_lines, glossary, character_names),
@@ -107,6 +129,7 @@ def translate_text_blocks(lines: List[str], glossary: Optional[Dict[str, str]] =
 
         endpoints = [
             (f"{LMSTUDIO_URL}/v1/chat/completions", chat_payload),
+            (f"{LMSTUDIO_URL}/api/v1/chat", qwen_payload),
             (f"{LMSTUDIO_URL}/v1/completions", text_payload),
             (f"{LMSTUDIO_URL}/api/generate", text_payload),
         ]
@@ -152,22 +175,7 @@ def translate_text_blocks(lines: List[str], glossary: Optional[Dict[str, str]] =
             raise RuntimeError("LMStudio request failed: no available endpoint")
 
         data = response.json()
-        content = None
-        if "choices" in data and data["choices"]:
-            content = data["choices"][0].get("message", {}).get("content")
-            if content is None and "text" in data["choices"][0]:
-                content = data["choices"][0]["text"]
-        elif "error" in data:
-            error_detail = data["error"]
-            if isinstance(error_detail, dict):
-                raise ValueError(
-                    f"LMStudio error from {last_endpoint}: {error_detail.get('message')} "
-                    f"(type={error_detail.get('type')}, code={error_detail.get('code')})"
-                )
-            raise ValueError(f"LMStudio error from {last_endpoint}: {error_detail}")
-        else:
-            raise ValueError(f"Unexpected LMStudio response format from {last_endpoint}: {data}")
-
+        content = extract_content_from_response(data, last_endpoint)
         translations = parse_response(content, len(missing_lines))
 
         for idx, translated in zip(missing_indices, translations):

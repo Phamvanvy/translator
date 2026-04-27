@@ -1,6 +1,6 @@
 const SERVER_URL = "http://127.0.0.1:8000";
 const LMSTUDIO_URL = "http://127.0.0.1:1234";
-const LMSTUDIO_MODEL = "qwen3.5-27b-claude-4.6-opus-reasoning-distilled-heretic-v2-i1";
+const LMSTUDIO_MODEL = "qwen2.5-14b-instruct";
 const LMSTUDIO_TIMEOUT_MS = 60000;
 let scanMode = false;
 let selectionMode = false;
@@ -13,6 +13,15 @@ const translationCache = new Map();
 const translationMemory = new Map();
 let glossary = {};
 let characterNames = [];
+let backendButton = null;
+let backendConfig = {
+  type: "LMStudio",
+  lmstudioUrl: LMSTUDIO_URL,
+  lmstudioModel: LMSTUDIO_MODEL,
+  deeplAuthKey: "",
+  googleApiKey: "",
+};
+const TESSERACT_LANG = "chi_sim+jpn+eng";
 const scanBuffer = [];
 const MAX_SCAN_BUFFER = 3;
 let currentTabId = null;
@@ -106,8 +115,8 @@ function createUI() {
     .region-box { position: fixed; border: 2px dashed #38bdf8; background: rgba(56, 189, 248, 0.16); pointer-events: none; display: none; }
     .annotation-layer { position: fixed; inset: 0; pointer-events: none; }
     .cleaned-overlay { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; background-repeat: no-repeat; background-position: top left; background-size: contain; opacity: 0.96; z-index: 0; }
-    .annotation-bg { position: absolute; background: rgba(0, 0, 0, 0.7); border-radius: 8px; pointer-events: none; z-index: 1; }
-    .annotation-box { position: absolute; color: #f8fafc; padding: 6px 10px; border-radius: 10px; font-size: 12px; line-height: 1.4; max-width: 320px; white-space: pre-wrap; word-break: break-word; box-shadow: 0 12px 30px rgba(0,0,0,0.35); z-index: 2; }
+    .annotation-bg { position: absolute; background: rgba(0, 0, 0, 0.76); border-radius: 8px; pointer-events: none; z-index: 1; }
+    .annotation-box { position: absolute; color: #f8fafc; padding: 8px 10px; border-radius: 8px; font-size: 14px; line-height: 1.5; max-width: 420px; white-space: pre-wrap; word-break: break-word; box-shadow: 0 16px 40px rgba(0,0,0,0.35); z-index: 2; }
   `;
 
   const root = document.createElement("div");
@@ -121,6 +130,7 @@ function createUI() {
       <button id="btn-clear">Clear Region</button>
       <button id="btn-glossary">Glossary</button>
       <button id="btn-characters">Character Names</button>
+      <button id="btn-backend">Backend: LMStudio</button>
       <div class="status">Status: <strong id="status">Idle</strong></div>
     </div>
     <div class="selection-overlay" id="selectionOverlay"></div>
@@ -150,9 +160,12 @@ function createUI() {
   glossaryButton.addEventListener("click", onGlossaryClicked);
   characterButton = shadow.getElementById("btn-characters");
   characterButton.addEventListener("click", onCharacterClicked);
+  backendButton = shadow.getElementById("btn-backend");
+  backendButton.addEventListener("click", onBackendClicked);
   selectionOverlay.addEventListener("mousedown", onSelectionMouseDown);
   loadGlossary();
   loadCharacterNames();
+  loadBackendConfig();
   loadTranslationMemory();
   selectionOverlay.addEventListener("mousemove", onSelectionMouseMove);
   selectionOverlay.addEventListener("mouseup", onSelectionMouseUp);
@@ -305,6 +318,61 @@ function saveCharacterNames() {
   } catch (err) {
     console.warn("Failed to save character names", err);
   }
+}
+
+function loadBackendConfig() {
+  try {
+    const raw = window.localStorage.getItem("autoScanBackendConfig");
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      backendConfig = { ...backendConfig, ...parsed };
+    }
+  } catch (err) {
+    console.warn("Failed to load backend config", err);
+  }
+}
+
+function saveBackendConfig() {
+  try {
+    window.localStorage.setItem("autoScanBackendConfig", JSON.stringify(backendConfig));
+  } catch (err) {
+    console.warn("Failed to save backend config", err);
+  }
+}
+
+function onBackendClicked() {
+  const type = window.prompt("Choose translation backend: LMStudio, DeepL, Google", backendConfig.type);
+  if (!type) {
+    return;
+  }
+  const normalized = type.trim();
+  if (!["LMStudio", "DeepL", "Google"].includes(normalized)) {
+    setStatus("Unknown backend type. Use LMStudio, DeepL, or Google.", true);
+    return;
+  }
+
+  backendConfig.type = normalized;
+  if (normalized === "LMStudio") {
+    backendConfig.lmstudioUrl = window.prompt("LMStudio URL:", backendConfig.lmstudioUrl) || backendConfig.lmstudioUrl;
+    backendConfig.lmstudioModel = window.prompt("LMStudio model:", backendConfig.lmstudioModel) || backendConfig.lmstudioModel;
+  } else if (normalized === "DeepL") {
+    backendConfig.deeplAuthKey = window.prompt("DeepL auth key:", backendConfig.deeplAuthKey) || backendConfig.deeplAuthKey;
+  } else if (normalized === "Google") {
+    backendConfig.googleApiKey = window.prompt("Google Translate API key:", backendConfig.googleApiKey) || backendConfig.googleApiKey;
+  }
+
+  saveBackendConfig();
+  updateButtons();
+  setStatus(`Translation backend set to ${backendConfig.type}.`);
+}
+
+function updateButtons() {
+  if (!startButton || !selectButton || !clearButton || !fabButton || !backendButton) return;
+  startButton.textContent = scanMode ? "Stop Scan" : "Start Scan";
+  selectButton.textContent = selectionMode ? "Cancel Select" : selectedRect ? "Change Region" : "Select Region";
+  clearButton.style.display = selectedRect ? "block" : "none";
+  fabButton.classList.toggle("scanning", scanMode);
+  backendButton.textContent = `Backend: ${backendConfig.type}`;
 }
 
 function loadTranslationMemory() {
@@ -564,28 +632,24 @@ function getViewportRect() {
 function startScan() {
   if (scanMode) return;
   scanMode = true;
-  if (scanTimer) window.clearInterval(scanTimer);
-  scanTimer = window.setInterval(() => {
-    scanOnce();
-  }, 1200);
-  setStatus("Scan started.");
+  setStatus("Scanning once...");
   updateButtons();
   scanOnce();
 }
 
 function stopScan() {
   scanMode = false;
-  if (scanTimer) {
-    window.clearInterval(scanTimer);
-    scanTimer = null;
-  }
+  queuedScan = null;
   updateButtons();
   setStatus("Scan stopped.");
 }
 
 function scanOnce() {
   const now = Date.now();
-  if (now - lastCaptureTimestamp < 1000) {
+  if (now - lastCaptureTimestamp < 3000) {
+    return;
+  }
+  if (inFlightScan && queuedScan) {
     return;
   }
   lastCaptureTimestamp = now;
@@ -610,6 +674,7 @@ function scanOnce() {
 
 async function initiateCapture(rect, prefetchRect) {
   return new Promise((resolve, reject) => {
+    console.log("initiateCapture start", { rect, prefetchRect, currentTabId });
     chrome.runtime.sendMessage({ action: "captureVisibleTab" }, async (response) => {
       if (chrome.runtime.lastError) {
         const message = chrome.runtime.lastError.message || 'Unknown runtime error';
@@ -641,6 +706,11 @@ async function initiateCapture(rect, prefetchRect) {
       try {
         const croppedDataUrl = await cropDataUrl(response.dataUrl, rect);
         const croppedImageData = await getImageDataFromDataUrl(croppedDataUrl);
+        console.log("initiateCapture cropped image", {
+          width: croppedImageData.width,
+          height: croppedImageData.height,
+          cacheKey: hashImageData(croppedImageData),
+        });
         const cacheKey = hashImageData(croppedImageData);
 
         const prefetchDataUrl = prefetchRect && (prefetchRect.left !== rect.left || prefetchRect.top !== rect.top || prefetchRect.width !== rect.width || prefetchRect.height !== rect.height)
@@ -707,7 +777,10 @@ async function processScan(task) {
       const next = queuedScan;
       queuedScan = null;
       processScan(next);
+      return;
     }
+    scanMode = false;
+    updateButtons();
   }
 }
 
@@ -715,25 +788,46 @@ function cropDataUrl(dataUrl, rect) {
   return new Promise((resolve, reject) => {
     const image = new Image();
     image.onload = () => {
-      const dpr = window.devicePixelRatio || 1;
+      const pageWidth = window.innerWidth || 1;
+      const pageHeight = window.innerHeight || 1;
+      const scaleX = image.naturalWidth / pageWidth;
+      const scaleY = image.naturalHeight / pageHeight;
+      const scale = (scaleX + scaleY) / 2;
+      const canvasWidth = Math.max(1, Math.round(rect.width * scale));
+      const canvasHeight = Math.max(1, Math.round(rect.height * scale));
       const canvas = document.createElement("canvas");
-      canvas.width = Math.round(rect.width * dpr);
-      canvas.height = Math.round(rect.height * dpr);
+      canvas.width = canvasWidth;
+      canvas.height = canvasHeight;
       const ctx = canvas.getContext("2d");
+      console.log("cropDataUrl", {
+        rect,
+        pageWidth,
+        pageHeight,
+        scaleX,
+        scaleY,
+        scale,
+        naturalWidth: image.naturalWidth,
+        naturalHeight: image.naturalHeight,
+        canvasWidth,
+        canvasHeight,
+      });
       ctx.drawImage(
         image,
-        Math.round(rect.left * dpr),
-        Math.round(rect.top * dpr),
-        Math.round(rect.width * dpr),
-        Math.round(rect.height * dpr),
+        Math.round(rect.left * scale),
+        Math.round(rect.top * scale),
+        Math.round(rect.width * scale),
+        Math.round(rect.height * scale),
         0,
         0,
-        Math.round(rect.width * dpr),
-        Math.round(rect.height * dpr)
+        canvasWidth,
+        canvasHeight
       );
       resolve(canvas.toDataURL("image/png"));
     };
-    image.onerror = reject;
+    image.onerror = (err) => {
+      console.error("cropDataUrl failed to load image", err, { rect });
+      reject(err);
+    };
     image.src = dataUrl;
   });
 }
@@ -754,6 +848,78 @@ function getImageDataFromDataUrl(dataUrl) {
   });
 }
 
+function preprocessDataUrlForOCR(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      const canvas = document.createElement("canvas");
+      const maxWidth = Math.max(1024, image.naturalWidth);
+      const maxHeight = Math.max(128, image.naturalHeight);
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(image, 0, 0);
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const data = imageData.data;
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
+        const gray = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+        const value = gray > 150 ? 255 : 0;
+        data[i] = value;
+        data[i + 1] = value;
+        data[i + 2] = value;
+      }
+      ctx.putImageData(imageData, 0, 0);
+      resolve(canvas.toDataURL("image/png"));
+    };
+    image.onerror = reject;
+    image.src = dataUrl;
+  });
+}
+
+function ensureMinDataUrlSize(dataUrl, minWidth = 300, minHeight = 48) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      let width = image.naturalWidth;
+      let height = image.naturalHeight;
+      let scale = 1;
+      if (width < minWidth) {
+        scale = Math.max(scale, minWidth / width);
+      }
+      if (height < minHeight) {
+        scale = Math.max(scale, minHeight / height);
+      }
+      console.log("ensureMinDataUrlSize", {
+        width,
+        height,
+        minWidth,
+        minHeight,
+        scale,
+      });
+      if (scale <= 1) {
+        return resolve(dataUrl);
+      }
+
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(width * scale);
+      canvas.height = Math.round(height * scale);
+      const ctx = canvas.getContext("2d");
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL("image/png"));
+    };
+    image.onerror = (err) => {
+      console.error("ensureMinDataUrlSize failed to load image", err);
+      reject(err);
+    };
+    image.src = dataUrl;
+  });
+}
+
 function hashImageData(imageData) {
   let hash = 5381;
   const data = imageData.data;
@@ -765,72 +931,249 @@ function hashImageData(imageData) {
 }
 
 async function requestOCR(dataUrl) {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), 20000);
-  const response = await fetch(`${SERVER_URL}/api/ocr`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ image: dataUrl }),
-    signal: controller.signal,
-  });
-  clearTimeout(timeout);
-  if (!response.ok) {
-    throw new Error(`OCR server returned ${response.status}`);
+  if (!window.Tesseract || typeof window.Tesseract.recognize !== "function") {
+    throw new Error("Tesseract.js is not loaded or not available.");
   }
-  const result = await response.json();
-  return result.lines || [];
+
+  const localLangPath = chrome.runtime.getURL("tesseract");
+  const baseOptions = {
+    logger: (message) => {
+      if (message.status && message.progress != null) {
+        const percent = Math.round(message.progress * 100);
+        setStatus(`OCR ${message.status}: ${percent}%`);
+      }
+    },
+    workerPath: chrome.runtime.getURL("tesseract/worker.min.js"),
+    corePath: chrome.runtime.getURL("tesseract/tesseract-core.wasm.js"),
+    gzip: false,
+    psm: 6,
+    tessedit_pageseg_mode: 6,
+    preserve_interword_spaces: 1,
+  };
+
+  let data;
+  console.log("requestOCR start", {
+    localLangPath,
+    language: TESSERACT_LANG,
+  });
+  const normalizedUrl = await ensureMinDataUrlSize(dataUrl);
+  const ocrReadyUrl = await preprocessDataUrlForOCR(normalizedUrl);
+  try {
+    ({ data } = await window.Tesseract.recognize(ocrReadyUrl, TESSERACT_LANG, {
+      ...baseOptions,
+      langPath: localLangPath,
+    }));
+  } catch (err) {
+    console.warn("Local Tesseract model failed, falling back to remote default langPath", err);
+    ({ data } = await window.Tesseract.recognize(ocrReadyUrl, TESSERACT_LANG, {
+      ...baseOptions,
+      gzip: true,
+    }));
+  }
+
+  const lines = (data.lines || []).map((line) => ({
+    text: String(line.text || "").trim(),
+    box: [
+      line.bbox?.x0 || 0,
+      line.bbox?.y0 || 0,
+      line.bbox?.x1 || 0,
+      line.bbox?.y1 || 0,
+    ],
+  })).filter((item) => item.text);
+
+  if (lines.length) {
+    return lines;
+  }
+
+  return [{ text: String(data.text || "").trim(), box: [0, 0, 0, 0] }].filter((item) => item.text);
 }
 
 function buildTranslationPrompt(lines) {
   const promptLines = lines.map((line, index) => `${index + 1}. ${line}`).join("\n");
-  return `You are a professional manga translator. Translate the texts below from the source language into Vietnamese. Tone: Casual, honorifics included. Preserve character names and formatting as much as possible. Do not add extra explanation or commentary. Return only the translated text for each input line as a JSON array of strings in the same order.\n\nTranslate these lines:\n${promptLines}`;
+  return `Translate the following text into Vietnamese. The source may include Chinese and English. Return only the Vietnamese translation as a JSON array of strings in the same order. Do not include explanations, comments, or extra text.\n\nTranslate these lines:\n${promptLines}`;
+}
+
+function parseModelResponse(data) {
+  if (!data) {
+    throw new Error("Empty model response.");
+  }
+
+  if (data.choices && data.choices.length) {
+    const choice = data.choices[0];
+    return (choice.message?.content || choice.text || "").trim();
+  }
+
+  if (typeof data.output_text === "string" && data.output_text.trim()) {
+    return data.output_text.trim();
+  }
+
+  if (typeof data.response === "string" && data.response.trim()) {
+    return data.response.trim();
+  }
+
+  if (typeof data.text === "string" && data.text.trim()) {
+    return data.text.trim();
+  }
+
+  if (typeof data === "string") {
+    return data.trim();
+  }
+
+  throw new Error("Unexpected model response format.");
 }
 
 function parseChatCompletionResponse(data) {
-  if (!data || !data.choices || !data.choices.length) {
-    throw new Error("Unexpected LMStudio response format.");
-  }
-  const choice = data.choices[0];
-  const content = choice.message?.content || choice.text || "";
-  const trimmed = content.trim();
+  const content = parseModelResponse(data);
+  const normalized = typeof content === "string" ? content.trim() : String(content || "");
   try {
-    const parsed = JSON.parse(trimmed);
+    const parsed = JSON.parse(normalized);
     if (Array.isArray(parsed)) {
       return parsed.map((item) => String(item).trim());
     }
   } catch (err) {
     // fallback
   }
-  const lines = trimmed.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  return lines;
+
+  return normalized.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+function proxyFetch(url, payload) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(
+      {
+        action: "proxyFetch",
+        url,
+        init: {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: payload,
+        },
+      },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          return reject(new Error(chrome.runtime.lastError.message));
+        }
+        if (!response) {
+          return reject(new Error("No response from proxy fetch."));
+        }
+        if (response.error) {
+          return reject(new Error(response.error));
+        }
+        resolve(response.data);
+      }
+    );
+  });
+}
+
+async function translateLines(lines) {
+  switch (backendConfig.type) {
+    case "LMStudio":
+      return translateLinesWithLMStudio(lines);
+    case "DeepL":
+      return translateLinesWithDeepL(lines);
+    case "Google":
+      return translateLinesWithGoogle(lines);
+    default:
+      throw new Error(`Unsupported backend type: ${backendConfig.type}`);
+  }
 }
 
 async function translateLinesWithLMStudio(lines) {
-  const payload = {
-    model: LMSTUDIO_MODEL,
-    messages: [
-      { role: "system", content: "You are a professional manga translator. Translate the texts below from the source language into Vietnamese. Tone: Casual, honorifics included. Preserve character names and formatting as much as possible. Do not add extra explanation or commentary. Return only the translated text for each input line as a JSON array of strings in the same order." },
-      { role: "user", content: buildTranslationPrompt(lines) },
-    ],
-    temperature: 0.2,
-    max_tokens: 1100,
-    top_p: 0.9,
-  };
+  const systemPrompt = "You are a professional translator. Translate the source text into natural Vietnamese. Preserve tone, character names, and formatting. Do not add explanations, commentary, or extra text.";
+  const userPrompt = buildTranslationPrompt(lines);
+
+  const endpoints = [
+    {
+      url: `${backendConfig.lmstudioUrl}/v1/chat/completions`,
+      payload: {
+        model: backendConfig.lmstudioModel,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+        temperature: 0.2,
+        max_tokens: 1100,
+        top_p: 0.9,
+      },
+    },
+    {
+      url: `${backendConfig.lmstudioUrl}/api/v1/chat`,
+      payload: {
+        model: backendConfig.lmstudioModel,
+        system_prompt: systemPrompt,
+        input: userPrompt,
+        temperature: 0.2,
+        top_p: 0.9,
+      },
+    },
+  ];
+
+  let lastError = null;
+  for (const endpoint of endpoints) {
+    try {
+      const data = await proxyFetch(endpoint.url, endpoint.payload);
+      return parseChatCompletionResponse(data);
+    } catch (err) {
+      lastError = err;
+      continue;
+    }
+  }
+  throw lastError || new Error("LMStudio backend request failed.");
+}
+
+async function translateLinesWithDeepL(lines) {
+  if (!backendConfig.deeplAuthKey) {
+    throw new Error("DeepL auth key is not configured.");
+  }
+  const params = new URLSearchParams();
+  params.append("auth_key", backendConfig.deeplAuthKey);
+  lines.forEach((line) => params.append("text", line));
+  params.append("target_lang", "VI");
+  params.append("source_lang", "JA");
 
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), LMSTUDIO_TIMEOUT_MS);
-  const response = await fetch(`${LMSTUDIO_URL}/v1/chat/completions`, {
+  const response = await fetch("https://api-free.deepl.com/v2/translate", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: params,
     signal: controller.signal,
   });
   clearTimeout(timeout);
   if (!response.ok) {
-    throw new Error(`LMStudio returned ${response.status}`);
+    throw new Error(`DeepL returned ${response.status}`);
   }
   const data = await response.json();
-  return parseChatCompletionResponse(data);
+  return (data.translations || []).map((item) => item.text || "");
+}
+
+async function translateLinesWithGoogle(lines) {
+  if (!backendConfig.googleApiKey) {
+    throw new Error("Google Translate API key is not configured.");
+  }
+  const body = {
+    q: lines,
+    source: "ja",
+    target: "vi",
+    format: "text",
+  };
+
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), LMSTUDIO_TIMEOUT_MS);
+  const response = await fetch(`https://translation.googleapis.com/language/translate/v2?key=${encodeURIComponent(backendConfig.googleApiKey)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: controller.signal,
+  });
+  clearTimeout(timeout);
+  if (!response.ok) {
+    throw new Error(`Google Translate returned ${response.status}`);
+  }
+  const data = await response.json();
+  if (!data.data || !Array.isArray(data.data.translations)) {
+    throw new Error("Unexpected Google Translate response.");
+  }
+  return data.data.translations.map((item) => item.translatedText || "");
 }
 
 async function sendToServer(dataUrl, rect, cacheKey) {
@@ -856,8 +1199,8 @@ async function sendToServer(dataUrl, rect, cacheKey) {
       .map(({ item }) => item.text);
 
     if (missingLines.length) {
-      setStatus("Translating text with LMStudio...");
-      const translated = await translateLinesWithLMStudio(missingLines);
+      setStatus(`Translating text with ${backendConfig.type}...`);
+      const translated = await translateLines(missingLines);
       let missingIndex = 0;
       items.forEach((item) => {
         if (!item.translation && item.text) {
@@ -877,9 +1220,9 @@ async function sendToServer(dataUrl, rect, cacheKey) {
   } catch (error) {
     console.error(error);
     if (error.name === "AbortError") {
-      setStatus("LMStudio request timed out. Check LMStudio or network.", true);
+      setStatus(`${backendConfig.type} request timed out. Check backend or network.`, true);
     } else if (error.message && error.message.includes("Failed to fetch")) {
-      setStatus("LMStudio or OCR server offline.", true);
+      setStatus(`${backendConfig.type} backend or OCR server offline.`, true);
     } else {
       setStatus(`Translation error: ${error.message}`, true);
     }

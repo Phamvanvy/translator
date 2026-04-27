@@ -62,6 +62,11 @@ uvicorn main:app --reload
 
 4a. Nếu bạn muốn dùng phiên bản browser-only, cài extension từ `browser/extension` thay vì `extension`.
 
+4b. Browser-only extension hiện dùng Tesseract.js để nhận diện chữ ngay trong trình duyệt.
+- `LMStudio` (local) để gọi endpoint tại `localhost:1234`
+- `DeepL` để gọi API cloud DeepL
+- `Google` để gọi Google Translate API
+
 5. Nếu muốn chọn vùng cụ thể, nhấn nút `Chọn vùng quét` trong extension rồi kéo thả vùng mong muốn.
 
 ### Cấu hình LMStudio
@@ -72,6 +77,21 @@ Nếu dùng LMStudio, đặt các biến môi trường sau trước khi chạy 
 $env:LMSTUDIO_URL = "http://localhost:1234"
 $env:LMSTUDIO_MODEL = "qwen3.5-27b-claude-4.6-opus-reasoning-distilled-heretic-v2-i1"
 ```
+
+### Cấu hình browser-only backend
+
+Trong `browser/extension`, mở menu extension và bấm `Backend` để chọn:
+- `LMStudio` để gọi local LMStudio
+- `DeepL` để gọi API DeepL
+- `Google` để gọi Google Translate API
+
+Khi chọn `DeepL` hoặc `Google`, extension sẽ yêu cầu nhập API key phù hợp.
+
+### Cấu hình browser-only OCR
+
+Extension giờ dùng Tesseract.js để OCR trong trình duyệt. Nếu bạn muốn tránh tải model từ mạng, hãy đặt file `jpn.traineddata` vào `browser/extension/tesseract/`.
+
+Nếu không có file này trong extension, Tesseract sẽ cố gắng tải model từ `https://tessdata.projectnaptha.com/4.0.0`.
 
 6. Nếu muốn chọn ngôn ngữ OCR trong menu extension, mặc định là `japan`.
 

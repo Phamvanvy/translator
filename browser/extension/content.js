@@ -21,6 +21,7 @@ let backendConfig = {
   deeplAuthKey: "",
   googleApiKey: "",
 };
+let overlayFontSize = parseInt(localStorage.getItem("overlayFontSize") || "14", 10);
 const TESSERACT_LANG = "chi_sim+jpn+eng";
 const scanBuffer = [];
 const MAX_SCAN_BUFFER = 3;
@@ -88,6 +89,7 @@ function createUI() {
 
   shadowRootHost = document.createElement("div");
   shadowRootHost.id = "manga-auto-scan-host";
+  shadowRootHost.style.cssText = "position:fixed;inset:0;z-index:2147483647;pointer-events:none;";
   document.documentElement.appendChild(shadowRootHost);
 
   shadowRoot = shadowRootHost.attachShadow({ mode: "open" });
@@ -115,8 +117,8 @@ function createUI() {
     .region-box { position: fixed; border: 2px dashed #38bdf8; background: rgba(56, 189, 248, 0.16); pointer-events: none; display: none; }
     .annotation-layer { position: fixed; inset: 0; pointer-events: none; }
     .cleaned-overlay { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; background-repeat: no-repeat; background-position: top left; background-size: contain; opacity: 0.96; z-index: 0; }
-    .annotation-bg { position: absolute; background: rgba(0, 0, 0, 0.76); border-radius: 8px; pointer-events: none; z-index: 1; }
-    .annotation-box { position: absolute; color: #f8fafc; padding: 8px 10px; border-radius: 8px; font-size: 14px; line-height: 1.5; max-width: 420px; white-space: pre-wrap; word-break: break-word; box-shadow: 0 16px 40px rgba(0,0,0,0.35); z-index: 2; }
+    .translation-overlay { position: absolute; background: rgba(0, 0, 0, 0.84); color: #f8fafc; padding: 14px; border-radius: 12px; font-size: 14px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; overflow-y: auto; box-shadow: 0 24px 64px rgba(0,0,0,0.4); z-index: 3; max-height: 100%; }
+    .annotation-box { position: absolute; background: rgba(0,0,0,0.92); color: #f8fafc; padding: 4px 8px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; font-weight: 500; box-sizing: border-box; }
   `;
 
   const root = document.createElement("div");
@@ -131,6 +133,7 @@ function createUI() {
       <button id="btn-glossary">Glossary</button>
       <button id="btn-characters">Character Names</button>
       <button id="btn-backend">Backend: LMStudio</button>
+      <button id="btn-fontsize">Text Size: 14px</button>
       <div class="status">Status: <strong id="status">Idle</strong></div>
     </div>
     <div class="selection-overlay" id="selectionOverlay"></div>
@@ -162,6 +165,15 @@ function createUI() {
   characterButton.addEventListener("click", onCharacterClicked);
   backendButton = shadow.getElementById("btn-backend");
   backendButton.addEventListener("click", onBackendClicked);
+  const fontSizeButton = shadow.getElementById("btn-fontsize");
+  fontSizeButton.textContent = `Text Size: ${overlayFontSize}px`;
+  fontSizeButton.addEventListener("click", () => {
+    const sizes = [12, 14, 16, 18, 20, 24];
+    const idx = (sizes.indexOf(overlayFontSize) + 1) % sizes.length;
+    overlayFontSize = sizes[idx];
+    localStorage.setItem("overlayFontSize", String(overlayFontSize));
+    fontSizeButton.textContent = `Text Size: ${overlayFontSize}px`;
+  });
   selectionOverlay.addEventListener("mousedown", onSelectionMouseDown);
   loadGlossary();
   loadCharacterNames();
@@ -341,20 +353,20 @@ function saveBackendConfig() {
 }
 
 function onBackendClicked() {
-  const type = window.prompt("Choose translation backend: LMStudio, DeepL, Google", backendConfig.type);
+  const type = window.prompt("Choose translation backend: LMStudio, LMStudio Vision, DeepL, Google", backendConfig.type);
   if (!type) {
     return;
   }
   const normalized = type.trim();
-  if (!["LMStudio", "DeepL", "Google"].includes(normalized)) {
-    setStatus("Unknown backend type. Use LMStudio, DeepL, or Google.", true);
+  if (!["LMStudio", "LMStudio Vision", "DeepL", "Google"].includes(normalized)) {
+    setStatus("Unknown backend type. Use LMStudio, LMStudio Vision, DeepL, or Google.", true);
     return;
   }
 
   backendConfig.type = normalized;
-  if (normalized === "LMStudio") {
+  if (normalized === "LMStudio" || normalized === "LMStudio Vision") {
     backendConfig.lmstudioUrl = window.prompt("LMStudio URL:", backendConfig.lmstudioUrl) || backendConfig.lmstudioUrl;
-    backendConfig.lmstudioModel = window.prompt("LMStudio model:", backendConfig.lmstudioModel) || backendConfig.lmstudioModel;
+    backendConfig.lmstudioModel = window.prompt("LMStudio model (vision-capable for LMStudio Vision):", backendConfig.lmstudioModel) || backendConfig.lmstudioModel;
   } else if (normalized === "DeepL") {
     backendConfig.deeplAuthKey = window.prompt("DeepL auth key:", backendConfig.deeplAuthKey) || backendConfig.deeplAuthKey;
   } else if (normalized === "Google") {
@@ -712,6 +724,7 @@ async function initiateCapture(rect, prefetchRect) {
           cacheKey: hashImageData(croppedImageData),
         });
         const cacheKey = hashImageData(croppedImageData);
+        const cropScale = rect.width > 0 ? croppedImageData.width / rect.width : (window.devicePixelRatio || 1);
 
         const prefetchDataUrl = prefetchRect && (prefetchRect.left !== rect.left || prefetchRect.top !== rect.top || prefetchRect.width !== rect.width || prefetchRect.height !== rect.height)
           ? await cropDataUrl(response.dataUrl, prefetchRect)
@@ -723,7 +736,7 @@ async function initiateCapture(rect, prefetchRect) {
           setStatus("No visual change detected in buffered viewport.");
           const cached = cacheGet(cacheKey);
           if (cached) {
-            renderAnnotations(cached, rect);
+            renderAnnotations(cached.items || cached, rect, cached.cropScale || cropScale);
           }
           return resolve();
         }
@@ -732,7 +745,7 @@ async function initiateCapture(rect, prefetchRect) {
           const cached = cacheGet(cacheKey);
           if (cached) {
             setStatus("Buffered scan hit, using cached translation.");
-            renderAnnotations(cached, rect);
+            renderAnnotations(cached.items || cached, rect, cached.cropScale || cropScale);
             lastPrefetchData = prefetchImageData;
             return resolve();
           }
@@ -740,7 +753,7 @@ async function initiateCapture(rect, prefetchRect) {
 
         lastPrefetchData = prefetchImageData;
         pushScanBuffer(prefetchHash);
-        enqueueScan(croppedDataUrl, rect, cacheKey);
+        enqueueScan(croppedDataUrl, rect, cacheKey, cropScale);
         resolve();
       } catch (error) {
         reject(error);
@@ -749,15 +762,15 @@ async function initiateCapture(rect, prefetchRect) {
   });
 }
 
-function enqueueScan(dataUrl, rect, cacheKey) {
+function enqueueScan(dataUrl, rect, cacheKey, cropScale) {
   const cached = cacheGet(cacheKey);
   if (cached) {
-    renderAnnotations(cached, rect);
+    renderAnnotations(cached.items || cached, rect, cached.cropScale || cropScale);
     setStatus("Loaded translation from cache.");
     return;
   }
 
-  const task = { dataUrl, rect, cacheKey };
+  const task = { dataUrl, rect, cacheKey, cropScale };
   if (inFlightScan) {
     queuedScan = task;
     setStatus("Scan queued.");
@@ -770,7 +783,7 @@ function enqueueScan(dataUrl, rect, cacheKey) {
 async function processScan(task) {
   inFlightScan = true;
   try {
-    await sendToServer(task.dataUrl, task.rect, task.cacheKey);
+    await sendToServer(task.dataUrl, task.rect, task.cacheKey, task.cropScale);
   } finally {
     inFlightScan = false;
     if (queuedScan) {
@@ -956,8 +969,29 @@ async function requestOCR(dataUrl) {
     localLangPath,
     language: TESSERACT_LANG,
   });
+
+  // Track dimensions so we can map OCR bboxes back to original image space.
+  // ensureMinDataUrlSize may upscale the image; OCR bboxes are in that scaled space.
+  const origDims = await new Promise((res) => {
+    const img = new Image();
+    img.onload = () => res({ width: img.naturalWidth, height: img.naturalHeight });
+    img.src = dataUrl;
+  });
+
   const normalizedUrl = await ensureMinDataUrlSize(dataUrl);
   const ocrReadyUrl = await preprocessDataUrlForOCR(normalizedUrl);
+
+  const ocrDims = await new Promise((res) => {
+    const img = new Image();
+    img.onload = () => res({ width: img.naturalWidth, height: img.naturalHeight });
+    img.src = ocrReadyUrl;
+  });
+
+  // Factor to convert OCR pixel coords → original cropped image pixel coords
+  const bboxScaleX = ocrDims.width > 0 ? origDims.width / ocrDims.width : 1;
+  const bboxScaleY = ocrDims.height > 0 ? origDims.height / ocrDims.height : 1;
+  console.log("requestOCR dims", { origDims, ocrDims, bboxScaleX, bboxScaleY });
+
   try {
     ({ data } = await window.Tesseract.recognize(ocrReadyUrl, TESSERACT_LANG, {
       ...baseOptions,
@@ -974,10 +1008,10 @@ async function requestOCR(dataUrl) {
   const lines = (data.lines || []).map((line) => ({
     text: String(line.text || "").trim(),
     box: [
-      line.bbox?.x0 || 0,
-      line.bbox?.y0 || 0,
-      line.bbox?.x1 || 0,
-      line.bbox?.y1 || 0,
+      (line.bbox?.x0 || 0) * bboxScaleX,
+      (line.bbox?.y0 || 0) * bboxScaleY,
+      (line.bbox?.x1 || 0) * bboxScaleX,
+      (line.bbox?.y1 || 0) * bboxScaleY,
     ],
   })).filter((item) => item.text);
 
@@ -985,12 +1019,12 @@ async function requestOCR(dataUrl) {
     return lines;
   }
 
-  return [{ text: String(data.text || "").trim(), box: [0, 0, 0, 0] }].filter((item) => item.text);
+  return [{ text: String(data.text || "").trim(), box: [0, 0, origDims.width, origDims.height] }].filter((item) => item.text);
 }
 
 function buildTranslationPrompt(lines) {
   const promptLines = lines.map((line, index) => `${index + 1}. ${line}`).join("\n");
-  return `Translate the following text into Vietnamese. The source may include Chinese and English. Return only the Vietnamese translation as a JSON array of strings in the same order. Do not include explanations, comments, or extra text.\n\nTranslate these lines:\n${promptLines}`;
+  return `Translate the following source text into Vietnamese only. Each source line may contain Chinese, English, or both. Translate the entire content of each line into fluent Vietnamese and return only a valid JSON array of strings in the same order. Do not include the original Chinese or English text, explanations, commentary, or any extra content. If a valid JSON array is not possible, return each translated line on a separate line only.\n\nSource lines:\n${promptLines}`;
 }
 
 function parseModelResponse(data) {
@@ -1031,10 +1065,25 @@ function parseChatCompletionResponse(data) {
       return parsed.map((item) => String(item).trim());
     }
   } catch (err) {
-    // fallback
+    const normalizedJson = normalized.replace(/[“”]/g, '"').replace(/'/g, '"');
+    try {
+      const parsed = JSON.parse(normalizedJson);
+      if (Array.isArray(parsed)) {
+        return parsed.map((item) => String(item).trim());
+      }
+    } catch (err2) {
+      // fallback to quoted extraction
+    }
+    const quoted = Array.from(normalized.matchAll(/"([^"]+)"/g)).map((match) => match[1].trim()).filter(Boolean);
+    if (quoted.length > 1) {
+      return quoted;
+    }
   }
 
-  return normalized.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return normalized
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*[\d\-\.\)\]]+\s*/, "").trim())
+    .filter(Boolean);
 }
 
 function proxyFetch(url, payload) {
@@ -1068,6 +1117,7 @@ function proxyFetch(url, payload) {
 async function translateLines(lines) {
   switch (backendConfig.type) {
     case "LMStudio":
+    case "LMStudio Vision":
       return translateLinesWithLMStudio(lines);
     case "DeepL":
       return translateLinesWithDeepL(lines);
@@ -1079,7 +1129,7 @@ async function translateLines(lines) {
 }
 
 async function translateLinesWithLMStudio(lines) {
-  const systemPrompt = "You are a professional translator. Translate the source text into natural Vietnamese. Preserve tone, character names, and formatting. Do not add explanations, commentary, or extra text.";
+  const systemPrompt = "You are a professional translator. Translate the source text into natural Vietnamese only. Preserve tone, character names, and formatting. Do not add explanations, commentary, or extra text. Do not output the original Chinese or English under any circumstances.";
   const userPrompt = buildTranslationPrompt(lines);
 
   const endpoints = [
@@ -1112,7 +1162,35 @@ async function translateLinesWithLMStudio(lines) {
   for (const endpoint of endpoints) {
     try {
       const data = await proxyFetch(endpoint.url, endpoint.payload);
-      return parseChatCompletionResponse(data);
+      const parsed = parseChatCompletionResponse(data);
+      if (parsed.length === lines.length && parsed.length > 0) {
+        return parsed;
+      }
+      lastError = new Error(`Unexpected translation length: ${parsed.length}`);
+    } catch (err) {
+      lastError = err;
+      continue;
+    }
+  }
+
+  const fallbackPrompt = `Translate each source line into Vietnamese only. Return one Vietnamese line per input line, with no original text, explanation, commentary, or extra output.\n\nSource lines:\n${lines.map((line, index) => `${index + 1}. ${line}`).join("\n")}`;
+  for (const endpoint of endpoints) {
+    try {
+      const payload = { ...endpoint.payload };
+      if (payload.messages) {
+        payload.messages = [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: fallbackPrompt },
+        ];
+      } else {
+        payload.input = fallbackPrompt;
+      }
+      const data = await proxyFetch(endpoint.url, payload);
+      const parsed = parseChatCompletionResponse(data);
+      if (parsed.length > 0) {
+        return parsed;
+      }
+      lastError = new Error(`Unexpected fallback translation length: ${parsed.length}`);
     } catch (err) {
       lastError = err;
       continue;
@@ -1129,7 +1207,7 @@ async function translateLinesWithDeepL(lines) {
   params.append("auth_key", backendConfig.deeplAuthKey);
   lines.forEach((line) => params.append("text", line));
   params.append("target_lang", "VI");
-  params.append("source_lang", "JA");
+  params.append("source_lang", "AUTO");
 
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), LMSTUDIO_TIMEOUT_MS);
@@ -1176,46 +1254,111 @@ async function translateLinesWithGoogle(lines) {
   return data.data.translations.map((item) => item.translatedText || "");
 }
 
-async function sendToServer(dataUrl, rect, cacheKey) {
+async function visionDetectAndTranslate(dataUrl, rect, cropScale) {
+  const prompt = [
+    "This is a manga/manhwa/comic image.",
+    "Find every Chinese (包括繁體) and English text block in the image.",
+    "For each text block return its position as fractions of image size (0.0–1.0) and its Vietnamese translation.",
+    "Return ONLY a valid JSON array — no other text:",
+    '[{"x":0.05,"y":0.10,"w":0.90,"h":0.08,"vi":"Bản dịch tiếng Việt ở đây"}]',
+    "If no Chinese or English text is found, return: []",
+  ].join("\n");
+
+  const payload = {
+    model: backendConfig.lmstudioModel,
+    messages: [{
+      role: "user",
+      content: [
+        { type: "image_url", image_url: { url: dataUrl } },
+        { type: "text", text: prompt },
+      ],
+    }],
+    temperature: 0.05,
+    max_tokens: 1400,
+  };
+
+  const data = await proxyFetch(`${backendConfig.lmstudioUrl}/v1/chat/completions`, payload);
+  const content = (data?.choices?.[0]?.message?.content || "").trim();
+  console.log("[Vision] raw response:", content.slice(0, 400));
+
+  const jsonStart = content.indexOf("[");
+  const jsonEnd = content.lastIndexOf("]");
+  if (jsonStart === -1 || jsonEnd === -1) throw new Error("Vision: no JSON array in response");
+
+  const parsed = JSON.parse(content.slice(jsonStart, jsonEnd + 1));
+  if (!Array.isArray(parsed) || !parsed.length) throw new Error("Vision: empty result array");
+
+  const imgW = rect.width * cropScale;
+  const imgH = rect.height * cropScale;
+
+  return parsed
+    .filter((item) => item.vi && item.w > 0 && item.h > 0)
+    .map((item) => ({
+      box: [
+        (item.x || 0) * imgW,
+        (item.y || 0) * imgH,
+        Math.max((item.w || 0) * imgW, 20),
+        Math.max((item.h || 0) * imgH, 20),
+      ],
+      text: item.src || "",
+      translation: String(item.vi).trim(),
+    }));
+}
+
+async function sendToServer(dataUrl, rect, cacheKey, cropScale) {
+  if (!cropScale || cropScale <= 0) cropScale = window.devicePixelRatio || 1;
   try {
-    setStatus("Running OCR in browser...");
-    const ocrItems = await requestOCR(dataUrl);
-    if (!ocrItems.length) {
-      setStatus("No text detected during OCR.", true);
-      return;
+    let items = null;
+
+    if (backendConfig.type === "LMStudio Vision") {
+      setStatus("Detecting & translating with Vision AI…");
+      try {
+        items = await visionDetectAndTranslate(dataUrl, rect, cropScale);
+        console.log("[Vision] detected items:", items.length);
+      } catch (e) {
+        console.warn("[Vision] falling back to OCR:", e.message);
+        items = null;
+      }
     }
 
-    const items = ocrItems.map((item) => {
-      return {
+    if (!items || !items.length) {
+      setStatus("Running OCR in browser...");
+      const ocrItems = await requestOCR(dataUrl);
+      if (!ocrItems.length) {
+        setStatus("No text detected during OCR.", true);
+        return;
+      }
+
+      items = ocrItems.map((item) => ({
         box: item.box ? [item.box[0], item.box[1], item.box[2] - item.box[0], item.box[3] - item.box[1]] : [0, 0, 0, 0],
         text: item.text || "",
         translation: memoryGet(buildMemoryKey(item.text || "")) || "",
-      };
-    });
+      }));
 
-    const missingLines = items
-      .map((item, index) => ({ item, index }))
-      .filter(({ item }) => !item.translation && item.text)
-      .map(({ item }) => item.text);
+      const missingLines = items
+        .map((item, index) => ({ item, index }))
+        .filter(({ item }) => !item.translation && item.text)
+        .map(({ item }) => item.text);
 
-    if (missingLines.length) {
-      setStatus(`Translating text with ${backendConfig.type}...`);
-      const translated = await translateLines(missingLines);
-      let missingIndex = 0;
-      items.forEach((item) => {
-        if (!item.translation && item.text) {
-          item.translation = translated[missingIndex] || "";
-          missingIndex += 1;
-        }
-        if (item.text) {
-          memorySet(buildMemoryKey(item.text), item.translation);
-        }
-      });
+      if (missingLines.length) {
+        setStatus(`Translating text with ${backendConfig.type}...`);
+        const translated = await translateLines(missingLines);
+        let missingIndex = 0;
+        items.forEach((item) => {
+          if (!item.translation && item.text) {
+            item.translation = translated[missingIndex] || "";
+            missingIndex += 1;
+          }
+          if (item.text) {
+            memorySet(buildMemoryKey(item.text), item.translation);
+          }
+        });
+      }
     }
 
     saveTranslationMemory();
-    cacheSet(cacheKey, items);
-    renderAnnotations(items, rect);
+    cacheSet(cacheKey, { items, cropScale });
+    renderAnnotations(items, rect, cropScale);
     setStatus(`Translated ${items.length} items in browser.`);
   } catch (error) {
     console.error(error);
@@ -1229,10 +1372,30 @@ async function sendToServer(dataUrl, rect, cacheKey) {
   }
 }
 
-function renderAnnotations(items, rect, cleanedImageUrl) {
+function dedupeTranslatedItems(items) {
+  const merged = [];
+  for (const item of items) {
+    const duplicate = merged.find((existing) => {
+      return (
+        existing.translation === item.translation &&
+        existing.text === item.text &&
+        Math.abs(existing.box[0] - item.box[0]) < 12 &&
+        Math.abs(existing.box[1] - item.box[1]) < 12 &&
+        Math.abs(existing.box[2] - item.box[2]) < 16 &&
+        Math.abs(existing.box[3] - item.box[3]) < 16
+      );
+    });
+    if (!duplicate) {
+      merged.push(item);
+    }
+  }
+  return merged;
+}
+
+function renderAnnotations(items, rect, cropScale, cleanedImageUrl) {
   if (!annotationLayer) return;
   annotationLayer.innerHTML = "";
-  const dpr = window.devicePixelRatio || 1;
+  const scale = (cropScale && cropScale > 0) ? cropScale : (window.devicePixelRatio || 1);
 
   if (cleanedImageUrl) {
     const overlay = document.createElement("div");
@@ -1246,27 +1409,25 @@ function renderAnnotations(items, rect, cleanedImageUrl) {
     annotationLayer.appendChild(overlay);
   }
 
-  items.forEach((item) => {
-    const left = rect.left + item.box[0] / dpr;
-    const top = rect.top + item.box[1] / dpr;
-    const width = Math.max(item.box[2] / dpr, 120);
-    const height = Math.max(item.box[3] / dpr, 24);
-
-    const bg = document.createElement("div");
-    bg.className = "annotation-bg";
-    bg.style.left = `${left}px`;
-    bg.style.top = `${top}px`;
-    bg.style.width = `${width + 8}px`;
-    bg.style.height = `${height + 8}px`;
-    annotationLayer.appendChild(bg);
+  const uniqueItems = dedupeTranslatedItems(items);
+  uniqueItems.forEach((item) => {
+    const label = item.translation || "";
+    const top = rect.top + item.box[1] / scale;
+    const left = rect.left + item.box[0] / scale;
+    const width = Math.max(item.box[2] / scale, 120);
+    const height = Math.max(item.box[3] / scale, 24);
 
     const box = document.createElement("div");
     box.className = "annotation-box";
-    box.textContent = item.translation || item.text || "...";
+    if (label) {
+      box.textContent = label;
+    }
     box.style.left = `${left}px`;
     box.style.top = `${top}px`;
-    box.style.width = `${Math.min(width, 360)}px`;
-    box.style.maxWidth = `${Math.min(Math.max(width, 120), 360)}px`;
+    box.style.width = `${width}px`;
+    box.style.minHeight = `${height}px`;
+    box.style.fontSize = `${overlayFontSize}px`;
+    box.style.padding = "8px 10px";
     annotationLayer.appendChild(box);
   });
 }

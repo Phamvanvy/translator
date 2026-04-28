@@ -141,7 +141,7 @@ def ocr_image(image: np.ndarray, lang: str = OCR_LANG_DEFAULT) -> List[Dict]:
             text = str(record.get("text", "")).strip()
             score = float(record.get("score", 0.0))
             box = record.get("box")
-            if not text or score < 0.3:
+            if not text or score < 0.1:
                 continue
             extracted = _extract_box(box)
             if not extracted:
@@ -152,6 +152,8 @@ def ocr_image(image: np.ndarray, lang: str = OCR_LANG_DEFAULT) -> List[Dict]:
                 polygon = [[int(pt[0]), int(pt[1])] for pt in box]
             else:
                 polygon = [[left, top], [right, top], [right, bottom], [left, bottom]]
+            width = right - left
+            height = bottom - top
             lines.append({
                 "text": text,
                 "confidence": score,
@@ -161,8 +163,10 @@ def ocr_image(image: np.ndarray, lang: str = OCR_LANG_DEFAULT) -> List[Dict]:
                 "top": top,
                 "right": right,
                 "bottom": bottom,
+                "mid_x": (left + right) / 2,
                 "mid_y": (top + bottom) / 2,
-                "height": bottom - top,
+                "width": width,
+                "height": height,
             })
 
     return lines
@@ -171,6 +175,62 @@ def ocr_image(image: np.ndarray, lang: str = OCR_LANG_DEFAULT) -> List[Dict]:
 def merge_text_lines(lines: List[Dict]) -> List[Dict]:
     if not lines:
         return []
+
+    vertical_lines = [line for line in lines if line["height"] / max(line["width"], 1) > 1.4]
+    if len(vertical_lines) < len(lines) * 0.5:
+        vertical_lines = [
+            line
+            for line in lines
+            if line["height"] >= line["width"] and line["height"] / max(line["width"], 1) > 0.8
+        ]
+    use_vertical_grouping = len(vertical_lines) >= len(lines) * 0.5
+
+    if use_vertical_grouping:
+        sorted_lines = sorted(lines, key=lambda item: (item["mid_x"], item["top"]))
+        groups: List[Dict] = []
+
+        for line in sorted_lines:
+            inserted = False
+            for group in groups:
+                x_distance = abs(line["mid_x"] - group["mid_x"])
+                threshold = max(20, (group["width"] + line["width"]) * 0.25)
+                if x_distance <= threshold:
+                    group["lines"].append(line)
+                    group["top"] = min(group["top"], line["top"])
+                    group["bottom"] = max(group["bottom"], line["bottom"])
+                    group["left"] = min(group["left"], line["left"])
+                    group["right"] = max(group["right"], line["right"])
+                    group["polygons"].append(line["polygon"])
+                    group["width"] = group["right"] - group["left"]
+                    group["height"] = group["bottom"] - group["top"]
+                    group["mid_x"] = (group["left"] + group["right"]) / 2
+                    inserted = True
+                    break
+
+            if not inserted:
+                groups.append({
+                    "lines": [line],
+                    "top": line["top"],
+                    "bottom": line["bottom"],
+                    "left": line["left"],
+                    "right": line["right"],
+                    "mid_x": line["mid_x"],
+                    "polygons": [line["polygon"]],
+                    "width": line["width"],
+                    "height": line["height"],
+                })
+
+        merged: List[Dict] = []
+        for group in groups:
+            ordered = sorted(group["lines"], key=lambda item: item["top"])
+            text = "".join([item["text"] for item in ordered])
+            merged.append({
+                "text": text.strip(),
+                "box": [group["left"], group["top"], group["right"], group["bottom"]],
+                "polygons": group["polygons"],
+            })
+
+        return merged
 
     sorted_lines = sorted(lines, key=lambda item: (item["mid_y"], item["left"]))
     groups: List[Dict] = []
@@ -223,6 +283,8 @@ def inpaint_text_regions(image: np.ndarray, polygons: List[List[List[int]]]) -> 
 
     mask = np.zeros(image.shape[:2], dtype=np.uint8)
     for polygon_group in polygons:
+        if not polygon_group:
+            continue
         for polygon in polygon_group:
             pts = np.array(polygon, dtype=np.int32)
             if pts.size == 0:
@@ -232,4 +294,10 @@ def inpaint_text_regions(image: np.ndarray, polygons: List[List[List[int]]]) -> 
     if not np.any(mask):
         return image
 
-    return cv2.inpaint(image, mask, 3, cv2.INPAINT_TELEA)
+    kernel = np.ones((5, 5), dtype=np.uint8)
+    mask = cv2.dilate(mask, kernel, iterations=1)
+
+    try:
+        return cv2.inpaint(image, mask, 3, cv2.INPAINT_TELEA)
+    except Exception:
+        return cv2.inpaint(image, mask, 3, cv2.INPAINT_NS)

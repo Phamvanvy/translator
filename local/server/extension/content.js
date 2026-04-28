@@ -26,6 +26,7 @@ let startButton = null;
 let clearButton = null;
 let glossaryButton = null;
 let characterButton = null;
+let fullFrameButton = null;
 let regionBox = null;
 let selectionOverlay = null;
 let annotationLayer = null;
@@ -107,8 +108,8 @@ function createUI() {
     .region-box { position: fixed; border: 2px dashed #38bdf8; background: rgba(56, 189, 248, 0.16); pointer-events: none; display: none; }
     .annotation-layer { position: fixed; inset: 0; pointer-events: none; }
     .cleaned-overlay { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; background-repeat: no-repeat; background-position: top left; background-size: contain; opacity: 0.96; z-index: 0; }
-    .annotation-bg { position: absolute; background: rgba(0, 0, 0, 0.7); border-radius: 8px; pointer-events: none; z-index: 1; }
-    .annotation-box { position: absolute; color: #f8fafc; padding: 6px 10px; border-radius: 10px; font-size: 12px; line-height: 1.4; max-width: 320px; white-space: pre-wrap; word-break: break-word; box-shadow: 0 12px 30px rgba(0,0,0,0.35); z-index: 2; }
+    .annotation-bg { position: absolute; background: rgba(0, 0, 0, 1); border-radius: 8px; pointer-events: none; z-index: 1; }
+    .annotation-box { position: absolute; background: rgba(0, 0, 0, 0.92); color: #f8fafc; padding: 6px 10px; border-radius: 10px; font-size: 12px; line-height: 1.4; max-width: 420px; white-space: normal; word-break: break-word; overflow-wrap: anywhere; box-shadow: 0 12px 30px rgba(0,0,0,0.35); z-index: 2; }
   `;
 
   const root = document.createElement("div");
@@ -120,6 +121,7 @@ function createUI() {
       <button id="btn-start">Start Scan</button>
       <button id="btn-select">Select Region</button>
       <button id="btn-clear">Clear Region</button>
+      <button id="btn-full-frame">Scan Full Frame</button>
       <button id="btn-glossary">Glossary</button>
       <button id="btn-characters">Character Names</button>
       <label style="display:block; margin: 8px 0 4px; font-size:12px; color:#cbd5e1;">OCR language</label>
@@ -156,6 +158,8 @@ function createUI() {
   startButton.addEventListener("click", onStartStopClicked);
   selectButton.addEventListener("click", onSelectClicked);
   clearButton.addEventListener("click", onClearClicked);
+  fullFrameButton = shadow.getElementById("btn-full-frame");
+  fullFrameButton.addEventListener("click", onFullFrameClicked);
   glossaryButton = shadow.getElementById("btn-glossary");
   glossaryButton.addEventListener("click", onGlossaryClicked);
   characterButton = shadow.getElementById("btn-characters");
@@ -266,6 +270,14 @@ function onClearClicked() {
   hideRegionBox();
   setStatus("Region cleared.");
   updateButtons();
+}
+
+function onFullFrameClicked() {
+  selectedRect = null;
+  hideRegionBox();
+  setStatus("Full frame scan started.");
+  updateButtons();
+  scanOnce();
 }
 
 function onGlossaryClicked() {
@@ -812,7 +824,7 @@ function hashImageData(imageData) {
 async function sendToServer(dataUrl, rect, cacheKey) {
   try {
     const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 10000);
+    const timeout = window.setTimeout(() => controller.abort(), 60000);
     const response = await fetch(`${SERVER_URL}/api/translate-image`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -840,7 +852,7 @@ async function sendToServer(dataUrl, rect, cacheKey) {
       }
     });
     saveTranslationMemory();
-    renderAnnotations(items, rect, result.cleaned_image);
+    renderAnnotations(items, rect);
     setStatus(`Translated ${items.length} items.`);
   } catch (error) {
     console.error(error);
@@ -854,45 +866,42 @@ async function sendToServer(dataUrl, rect, cacheKey) {
   }
 }
 
-function renderAnnotations(items, rect, cleanedImageUrl) {
+function renderAnnotations(items, rect) {
   if (!annotationLayer) return;
   annotationLayer.innerHTML = "";
   const dpr = window.devicePixelRatio || 1;
 
-  if (cleanedImageUrl) {
-    const overlay = document.createElement("div");
-    overlay.className = "cleaned-overlay";
-    overlay.style.left = `${rect.left}px`;
-    overlay.style.top = `${rect.top}px`;
-    overlay.style.width = `${rect.width}px`;
-    overlay.style.height = `${rect.height}px`;
-    overlay.style.backgroundImage = `url(${cleanedImageUrl})`;
-    overlay.style.backgroundSize = `${rect.width}px ${rect.height}px`;
-    annotationLayer.appendChild(overlay);
-  }
-
   items.forEach((item) => {
     const left = rect.left + item.box[0] / dpr;
     const top = rect.top + item.box[1] / dpr;
-    const width = Math.max(item.box[2] / dpr, 120);
-    const height = Math.max(item.box[3] / dpr, 24);
+    const itemWidth = (item.box[2] - item.box[0]) / dpr;
+    const itemHeight = (item.box[3] - item.box[1]) / dpr;
+    let translatedText = (item.translation || "").trim();
+    translatedText = translatedText.replace(/\s*\n\s*/g, " ").replace(/\s+/g, " ").trim();
+    const width = Math.max(itemWidth, 280);
+    const height = Math.max(itemHeight, 24);
+    const displayWidth = Math.min(Math.max(Math.max(width, Math.min(translatedText.length * 12, 340)), itemWidth + 16), 520);
+    const renderLeft = left;
+    const renderLeftFixed = renderLeft + displayWidth > window.innerWidth - 20 ? Math.max(12, left - displayWidth - 12) : renderLeft;
 
     const bg = document.createElement("div");
     bg.className = "annotation-bg";
-    bg.style.left = `${left}px`;
+    bg.style.left = `${renderLeftFixed}px`;
     bg.style.top = `${top}px`;
-    bg.style.width = `${width + 8}px`;
-    bg.style.height = `${height + 8}px`;
+    bg.style.width = `${Math.max(displayWidth + 16, itemWidth + 24)}px`;
+    bg.style.height = `${Math.max(height + 16, itemHeight + 24)}px`;
     annotationLayer.appendChild(bg);
 
-    const box = document.createElement("div");
-    box.className = "annotation-box";
-    box.textContent = item.translation || item.text || "...";
-    box.style.left = `${left}px`;
-    box.style.top = `${top}px`;
-    box.style.width = `${Math.min(width, 360)}px`;
-    box.style.maxWidth = `${Math.min(Math.max(width, 120), 360)}px`;
-    annotationLayer.appendChild(box);
+    if (translatedText) {
+      const box = document.createElement("div");
+      box.className = "annotation-box";
+      box.textContent = translatedText;
+      box.style.left = `${renderLeftFixed + 8}px`;
+      box.style.top = `${top + 8}px`;
+      box.style.width = `${displayWidth}px`;
+      box.style.maxWidth = `520px`;
+      annotationLayer.appendChild(box);
+    }
   });
 }
 

@@ -1,5 +1,6 @@
 import base64
 import logging
+import re
 from typing import List
 
 import cv2
@@ -117,28 +118,37 @@ def api_translate_image(request: ImageTranslateRequest):
             glossary=merged_glossary,
             character_names=request.character_names,
         )
-        cleaned_image = None
-        try:
-            cleaned = inpaint_text_regions(image, [item["box"] for item in merged])
-            cleaned_image = encode_image_to_data_url(cleaned)
-        except Exception:
-            cleaned_image = None
+
+        if len(translations) != len(merged) and translations:
+            candidate = [
+                re.sub(r"^\s*\d+[\.)]?\s*", "", line).strip()
+                for line in translations[0].splitlines()
+                if line.strip()
+            ]
+            if len(candidate) == len(merged):
+                translations = candidate
+                logger.warning(
+                    "Adjusted translation count from %d to %d using split fallback.",
+                    len(translations),
+                    len(merged),
+                )
 
         payload = []
-        for item, translated in zip(merged, translations):
+        for index, item in enumerate(merged):
+            translated = translations[index] if index < len(translations) else ""
             left, top, right, bottom = item["box"]
             width = right - left
             height = bottom - top
             payload.append(
                 {
                     "box": [left, top, width, height],
+                    "polygons": item["polygons"],
                     "text": item["text"],
                     "translation": translated,
+                    "writing_mode": "vertical-rl" if height / max(width, 1) > 1.5 else "horizontal-tb",
                 }
             )
         result = {"results": payload}
-        if cleaned_image:
-            result["cleaned_image"] = cleaned_image
         return result
     except Exception as exc:
         logger.exception("Translate-image request failed")

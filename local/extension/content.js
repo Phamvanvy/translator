@@ -1,4 +1,5 @@
 const SERVER_URL = "http://127.0.0.1:8000";
+let ocrLang = localStorage.getItem("ocrLang") || "ch";
 let scanMode = false;
 let selectionMode = false;
 let selectedRect = null;
@@ -76,6 +77,7 @@ function createUI() {
 
   shadowRootHost = document.createElement("div");
   shadowRootHost.id = "manga-auto-scan-host";
+  shadowRootHost.style.cssText = "position:fixed;inset:0;z-index:2147483647;pointer-events:none;";
   document.documentElement.appendChild(shadowRootHost);
 
   shadowRoot = shadowRootHost.attachShadow({ mode: "open" });
@@ -103,8 +105,7 @@ function createUI() {
     .region-box { position: fixed; border: 2px dashed #38bdf8; background: rgba(56, 189, 248, 0.16); pointer-events: none; display: none; }
     .annotation-layer { position: fixed; inset: 0; pointer-events: none; }
     .cleaned-overlay { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; background-repeat: no-repeat; background-position: top left; background-size: contain; opacity: 0.96; z-index: 0; }
-    .annotation-bg { position: absolute; background: rgba(0, 0, 0, 0.7); border-radius: 8px; pointer-events: none; z-index: 1; }
-    .annotation-box { position: absolute; color: #f8fafc; padding: 6px 10px; border-radius: 10px; font-size: 12px; line-height: 1.4; max-width: 320px; white-space: pre-wrap; word-break: break-word; box-shadow: 0 12px 30px rgba(0,0,0,0.35); z-index: 2; }
+    .annotation-box { position: absolute; background: rgba(0,0,0,0.92); color: #f8fafc; padding: 4px 8px; font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; font-weight: 500; box-sizing: border-box; }
   `;
 
   const root = document.createElement("div");
@@ -118,6 +119,7 @@ function createUI() {
       <button id="btn-clear">Clear Region</button>
       <button id="btn-glossary">Glossary</button>
       <button id="btn-characters">Character Names</button>
+      <button id="btn-lang">OCR: Chinese</button>
       <div class="status">Status: <strong id="status">Idle</strong></div>
     </div>
     <div class="selection-overlay" id="selectionOverlay"></div>
@@ -147,6 +149,19 @@ function createUI() {
   glossaryButton.addEventListener("click", onGlossaryClicked);
   characterButton = shadow.getElementById("btn-characters");
   characterButton.addEventListener("click", onCharacterClicked);
+
+  const langButton = shadow.getElementById("btn-lang");
+  const langLabels = { ch: "OCR: Chinese", japan: "OCR: Japanese", en: "OCR: English" };
+  langButton.textContent = langLabels[ocrLang] || `OCR: ${ocrLang}`;
+  langButton.addEventListener("click", () => {
+    const langs = ["ch", "japan", "en"];
+    const idx = (langs.indexOf(ocrLang) + 1) % langs.length;
+    ocrLang = langs[idx];
+    localStorage.setItem("ocrLang", ocrLang);
+    langButton.textContent = langLabels[ocrLang] || `OCR: ${ocrLang}`;
+    setStatus(`OCR language set to ${ocrLang}.`);
+  });
+
   selectionOverlay.addEventListener("mousedown", onSelectionMouseDown);
   loadGlossary();
   loadCharacterNames();
@@ -155,7 +170,16 @@ function createUI() {
   selectionOverlay.addEventListener("mouseup", onSelectionMouseUp);
   selectionOverlay.addEventListener("mouseleave", onSelectionMouseLeave);
 
+  window.addEventListener("scroll", clearAnnotations, true);
+  window.addEventListener("resize", clearAnnotations);
+
   updateButtons();
+}
+
+function clearAnnotations() {
+  if (!annotationLayer) return;
+  annotationLayer.innerHTML = "";
+  setStatus("Overlay cleared after scroll/resize.");
 }
 
 function toggleMenu() {
@@ -558,16 +582,19 @@ function getViewportRect() {
   return { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
 }
 
-function startScan() {
+async function startScan() {
   if (scanMode) return;
   scanMode = true;
-  if (scanTimer) window.clearInterval(scanTimer);
-  scanTimer = window.setInterval(() => {
-    scanOnce();
-  }, 1200);
-  setStatus("Scan started.");
+  setStatus("Scanning now...");
   updateButtons();
-  scanOnce();
+  try {
+    await scanOnce();
+  } finally {
+    if (scanMode) {
+      scanMode = false;
+      updateButtons();
+    }
+  }
 }
 
 function stopScan() {
@@ -580,7 +607,7 @@ function stopScan() {
   setStatus("Scan stopped.");
 }
 
-function scanOnce() {
+async function scanOnce() {
   const now = Date.now();
   if (now - lastCaptureTimestamp < 1000) {
     return;
@@ -588,13 +615,18 @@ function scanOnce() {
   lastCaptureTimestamp = now;
   const rect = selectedRect || getViewportRect();
   const prefetchRect = selectedRect ? expandRect(rect, 0.2) : rect;
-  initiateCapture(rect, prefetchRect).catch((err) => {
+  try {
+    await initiateCapture(rect, prefetchRect);
+  } catch (err) {
     const message = err?.message?.toLowerCase() || "";
     if (
       message.includes("active tab") ||
       message.includes("activetab") ||
       message.includes("extension context invalidated") ||
-      message.includes("quota")
+      message.includes("quota") ||
+      message.includes("failed to fetch") ||
+      message.includes("server returned") ||
+      err?.name === "AbortError"
     ) {
       stopScan();
       setStatus(`Scan error: ${err.message}`, true);
@@ -602,7 +634,7 @@ function scanOnce() {
     }
     console.error(err);
     setStatus(`Scan error: ${err.message}`, true);
-  });
+  }
 }
 
 async function initiateCapture(rect, prefetchRect) {
@@ -735,6 +767,79 @@ function cropDataUrl(dataUrl, rect) {
   });
 }
 
+function splitRectIntoTwoRegions(rect) {
+  if (rect.width > 880 && rect.width >= rect.height) {
+    const half = Math.floor(rect.width / 2);
+    return [
+      { left: 0, top: 0, width: half + 20, height: rect.height },
+      { left: half - 20, top: 0, width: rect.width - half + 20, height: rect.height },
+    ];
+  }
+  if (rect.height > 1100 && rect.height > rect.width) {
+    const half = Math.floor(rect.height / 2);
+    return [
+      { left: 0, top: 0, width: rect.width, height: half + 20 },
+      { left: 0, top: half - 20, width: rect.width, height: rect.height - half + 20 },
+    ];
+  }
+  return [{ left: 0, top: 0, width: rect.width, height: rect.height }];
+}
+
+function dedupeTranslatedItems(items) {
+  const merged = [];
+  for (const item of items) {
+    const duplicate = merged.find((existing) => {
+      return (
+        existing.translation === item.translation &&
+        Math.abs(existing.box[0] - item.box[0]) < 12 &&
+        Math.abs(existing.box[1] - item.box[1]) < 12 &&
+        Math.abs(existing.box[2] - item.box[2]) < 16 &&
+        Math.abs(existing.box[3] - item.box[3]) < 16
+      );
+    });
+    if (!duplicate) {
+      merged.push(item);
+    }
+  }
+  return merged;
+}
+
+async function requestTileTranslation(tileDataUrl, tileRect) {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 600000);
+  try {
+    const response = await fetch(`${SERVER_URL}/api/translate-image`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        image: tileDataUrl,
+        lang: ocrLang,
+        glossary,
+        character_names: characterNames,
+        domain_id: getDomainId(),
+        tab_id: currentTabId,
+      }),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`Server returned ${response.status}`);
+    }
+    const data = await response.json();
+    const results = (data.results || []).map((item) => ({
+      ...item,
+      box: [
+        item.box[0] + tileRect.left,
+        item.box[1] + tileRect.top,
+        item.box[2],
+        item.box[3],
+      ],
+    }));
+    return { results, cleaned_image: data.cleaned_image };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function getImageDataFromDataUrl(dataUrl) {
   return new Promise((resolve, reject) => {
     const image = new Image();
@@ -762,14 +867,17 @@ function hashImageData(imageData) {
 }
 
 async function sendToServer(dataUrl, rect, cacheKey) {
+  let timeout = null;
   try {
+    setStatus("Detecting text blobs...");
     const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 10000);
+    timeout = window.setTimeout(() => controller.abort(), 60000);
     const response = await fetch(`${SERVER_URL}/api/translate-image`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         image: dataUrl,
+        lang: ocrLang,
         glossary,
         character_names: characterNames,
         domain_id: getDomainId(),
@@ -777,7 +885,6 @@ async function sendToServer(dataUrl, rect, cacheKey) {
       }),
       signal: controller.signal,
     });
-    clearTimeout(timeout);
     if (!response.ok) {
       throw new Error(`Server returned ${response.status}`);
     }
@@ -795,14 +902,56 @@ async function sendToServer(dataUrl, rect, cacheKey) {
     setStatus(`Translated ${items.length} items.`);
   } catch (error) {
     console.error(error);
+    if (scanMode) {
+      stopScan();
+    }
     if (error.name === "AbortError") {
-      setStatus("Server request timed out. Server offline or unresponsive.", true);
+      setStatus("Server request timed out. Auto-scan stopped.", true);
     } else if (error.message && error.message.includes("Failed to fetch")) {
-      setStatus("Server offline or network error.", true);
+      setStatus("Server offline or network error. Auto-scan stopped.", true);
     } else {
-      setStatus(`Server error: ${error.message}`, true);
+      setStatus(`Server error: ${error.message}. Auto-scan stopped.`, true);
+    }
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
     }
   }
+}
+
+function groupAnnotationItems(items) {
+  const rows = [];
+  const sorted = [...items].filter((item) => item.translation || item.text).sort((a, b) => a.box[1] - b.box[1] || a.box[0] - b.box[0]);
+  for (const item of sorted) {
+    const label = item.translation || item.text || "";
+    if (!label) continue;
+    const itemMid = item.box[1] + item.box[3] / 2;
+    const group = rows.find((row) => Math.abs(row.mid - itemMid) < Math.max(24, item.box[3] * 0.6));
+    if (group) {
+      group.items.push(item);
+      group.left = Math.min(group.left, item.box[0]);
+      group.top = Math.min(group.top, item.box[1]);
+      group.right = Math.max(group.right, item.box[0] + item.box[2]);
+      group.bottom = Math.max(group.bottom, item.box[1] + item.box[3]);
+      group.mid = (group.top + group.bottom) / 2;
+    } else {
+      rows.push({
+        items: [item],
+        left: item.box[0],
+        top: item.box[1],
+        right: item.box[0] + item.box[2],
+        bottom: item.box[1] + item.box[3],
+        mid: itemMid,
+      });
+    }
+  }
+  return rows.map((row) => ({
+    left: row.left,
+    top: row.top,
+    width: Math.max(row.right - row.left, 120),
+    height: Math.max(row.bottom - row.top, 24),
+    text: row.items.map((item) => item.translation || item.text).join(" "),
+  }));
 }
 
 function renderAnnotations(items, rect, cleanedImageUrl) {
@@ -822,28 +971,40 @@ function renderAnnotations(items, rect, cleanedImageUrl) {
     annotationLayer.appendChild(overlay);
   }
 
-  items.forEach((item) => {
+  const uniqueItems = dedupeTranslatedItems(items);
+  uniqueItems.forEach((item) => {
+    const raw = item.translation || item.text || "";
+    if (!raw) return;
+
+    const label = raw
+      .trim()
+      .split(/\s+/)
+      .join("\n");
+
     const left = rect.left + item.box[0] / dpr;
     const top = rect.top + item.box[1] / dpr;
-    const width = Math.max(item.box[2] / dpr, 120);
-    const height = Math.max(item.box[3] / dpr, 24);
+    const width = Math.min(Math.max(item.box[2] / dpr, 80), 120);
+    const height = Math.max(item.box[3] / dpr, 28);
 
     const bg = document.createElement("div");
-    bg.className = "annotation-bg";
+    bg.className = "annotation-box";
     bg.style.left = `${left}px`;
     bg.style.top = `${top}px`;
-    bg.style.width = `${width + 8}px`;
-    bg.style.height = `${height + 8}px`;
+    bg.style.width = `${width}px`;
+    bg.style.minHeight = `${height}px`;
+    bg.style.padding = "6px 8px";
+    bg.style.borderRadius = "10px";
+    bg.style.background = "rgba(0, 0, 0, 0.9)";
+    bg.style.color = "#f8fafc";
+    bg.style.textShadow = "0 0 3px rgba(0,0,0,0.8)";
+    bg.style.fontSize = "14px";
+    bg.style.lineHeight = "1.4";
+    bg.style.boxSizing = "border-box";
+    bg.style.whiteSpace = "pre";
+    bg.style.wordBreak = "break-word";
+    bg.style.pointerEvents = "none";
+    bg.textContent = label;
     annotationLayer.appendChild(bg);
-
-    const box = document.createElement("div");
-    box.className = "annotation-box";
-    box.textContent = item.translation || item.text || "...";
-    box.style.left = `${left}px`;
-    box.style.top = `${top}px`;
-    box.style.width = `${Math.min(width, 360)}px`;
-    box.style.maxWidth = `${Math.min(Math.max(width, 120), 360)}px`;
-    annotationLayer.appendChild(box);
   });
 }
 

@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 from typing import Dict, List, Optional
 
 from env_loader import load_dotenv
@@ -15,11 +16,11 @@ LMSTUDIO_MODEL = os.getenv("LMSTUDIO_MODEL", os.getenv("OLLAMA_MODEL", "gemma2")
 LMSTUDIO_TIMEOUT = int(os.getenv("LMSTUDIO_TIMEOUT", os.getenv("OLLAMA_TIMEOUT", "60")))
 
 SYSTEM_PROMPT_BASE = (
-    "You are a professional manga translator. "
-    "Translate the given Japanese text into natural Vietnamese. "
+    "You are a professional manga/manhwa/manhua translator. "
+    "Translate the given Chinese or Japanese text into natural Vietnamese only. "
     "Preserve tone, character names, and formatting. "
-    "Do not add explanations, commentary, or extra text. "
-    "Return only the translated content in the requested format."
+    "Do not add explanations, commentary, extra text, or the original Chinese/Japanese source. "
+    "Return only the translated Vietnamese content in the requested format."
 )
 
 
@@ -30,7 +31,7 @@ def build_prompt(lines: List[str], glossary: Optional[Dict[str, str]] = None, ch
     if glossary:
         entries = ", ".join([f'"{k}" -> "{v}"' for k, v in glossary.items()])
         prompt.append(f"Use this glossary when translating: {entries}.")
-    prompt.append("Translate these lines from Japanese into Vietnamese.")
+    prompt.append("Translate these lines (Chinese, Japanese, or English) into Vietnamese only. Return Vietnamese only, not the source text.")
     for idx, line in enumerate(lines, start=1):
         prompt.append(f"{idx}. {line}")
     prompt.append("Return the translated lines as a JSON array of strings in the same order.")
@@ -39,16 +40,54 @@ def build_prompt(lines: List[str], glossary: Optional[Dict[str, str]] = None, ch
 
 def parse_response(response_text: str, count: int) -> List[str]:
     trimmed = response_text.strip()
+    if not trimmed:
+        return ["" for _ in range(count)]
+
+    def normalize_lines(lines: List[str]) -> List[str]:
+        return [line.strip() for line in lines if line.strip()]
+
+    def strip_numbering(lines: List[str]) -> List[str]:
+        stripped = [re.sub(r"^\s*\d+[\.)]?\s*", "", line).strip() for line in lines]
+        return [line for line in stripped if line]
+
     try:
         parsed = json.loads(trimmed)
-        if isinstance(parsed, list) and len(parsed) == count:
-            return [str(item).strip() for item in parsed]
+        if isinstance(parsed, list):
+            normalized = [str(item).strip() for item in parsed]
+            if len(normalized) == count:
+                return normalized
+            if len(normalized) > count:
+                return normalized[:count]
+            if len(normalized) == 1:
+                nested = normalize_lines(str(parsed[0]).splitlines())
+                if len(nested) == count:
+                    return nested
     except Exception:
         pass
 
-    fallback = [line.strip() for line in trimmed.splitlines() if line.strip()]
-    if len(fallback) == count:
-        return fallback
+    array_match = re.search(r"(\[.*\])", trimmed, re.S)
+    if array_match:
+        try:
+            parsed = json.loads(array_match.group(1))
+            if isinstance(parsed, list):
+                normalized = [str(item).strip() for item in parsed]
+                if len(normalized) == count:
+                    return normalized
+                if len(normalized) > count:
+                    return normalized[:count]
+        except Exception:
+            pass
+
+    lines = normalize_lines(trimmed.splitlines())
+    if len(lines) == count:
+        return lines
+
+    numbered = strip_numbering(lines)
+    if len(numbered) == count:
+        return numbered
+
+    if len(lines) > count:
+        return lines[:count]
 
     return [trimmed]
 

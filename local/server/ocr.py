@@ -176,14 +176,16 @@ def merge_text_lines(lines: List[Dict]) -> List[Dict]:
     if not lines:
         return []
 
-    vertical_lines = [line for line in lines if line["height"] / max(line["width"], 1) > 1.4]
-    if len(vertical_lines) < len(lines) * 0.5:
-        vertical_lines = [
-            line
-            for line in lines
-            if line["height"] >= line["width"] and line["height"] / max(line["width"], 1) > 0.8
-        ]
-    use_vertical_grouping = len(vertical_lines) >= len(lines) * 0.5
+    # Manga and visual novels almost exclusively use vertical text columns.
+    # Forcing vertical grouping prevents horizontal merging from combining
+    # characters from different columns into wide, shallow boxes.
+    use_vertical_grouping = True
+
+    # Sanity-check: if clearly no vertical lines at all, fall back to horizontal.
+    strong_vertical = [l for l in lines if l["height"] / max(l["width"], 1) > 2.0]
+    any_vertical    = [l for l in lines if l["height"] >= l["width"] and l["height"] / max(l["width"], 1) > 0.8]
+    if not any_vertical:
+        use_vertical_grouping = False
 
     if use_vertical_grouping:
         sorted_lines = sorted(lines, key=lambda item: (item["mid_x"], item["top"]))
@@ -193,8 +195,15 @@ def merge_text_lines(lines: List[Dict]) -> List[Dict]:
             inserted = False
             for group in groups:
                 x_distance = abs(line["mid_x"] - group["mid_x"])
-                threshold = max(20, (group["width"] + line["width"]) * 0.25)
-                if x_distance <= threshold:
+                # Tighter X threshold: only merge if mid_x is very close (same column)
+                x_threshold = max(12, min(group["width"], line["width"]) * 0.4)
+                # Prevent merging lines from different speech bubbles
+                vertical_gap = max(0, line["top"] - group["bottom"]) if line["top"] > group["bottom"] else max(0, group["top"] - line["bottom"])
+                max_vertical_gap = min(30, max(line["height"], 10) * 1.5)
+                # Cap total group height to avoid absorbing distant bubbles
+                merged_height = max(group["bottom"], line["bottom"]) - min(group["top"], line["top"])
+                max_group_height = 600
+                if x_distance <= x_threshold and vertical_gap <= max_vertical_gap and merged_height <= max_group_height:
                     group["lines"].append(line)
                     group["top"] = min(group["top"], line["top"])
                     group["bottom"] = max(group["bottom"], line["bottom"])

@@ -13,7 +13,7 @@ from typing import Dict, List, Optional
 
 from glossary_store import get_glossary, update_glossary
 from ocr import decode_image, merge_text_lines, ocr_image, inpaint_text_regions
-from translate import translate_text_blocks
+from translate import translate_text_blocks, translate_with_vision
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("translator_server")
@@ -113,7 +113,8 @@ def api_translate_image(request: ImageTranslateRequest):
         merged_glossary = {**stored_glossary, **(request.glossary or {})}
 
         texts = [item["text"] for item in merged]
-        translations = translate_text_blocks(
+        translations = translate_with_vision(
+            request.image,
             texts,
             glossary=merged_glossary,
             character_names=request.character_names,
@@ -141,7 +142,7 @@ def api_translate_image(request: ImageTranslateRequest):
             height = bottom - top
             payload.append(
                 {
-                    "box": [left, top, width, height],
+                    "box": [left, top, right, bottom],
                     "polygons": item["polygons"],
                     "text": item["text"],
                     "translation": translated,

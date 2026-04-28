@@ -16,25 +16,33 @@ LMSTUDIO_MODEL = os.getenv("LMSTUDIO_MODEL", os.getenv("OLLAMA_MODEL", "gemma2")
 LMSTUDIO_TIMEOUT = int(os.getenv("LMSTUDIO_TIMEOUT", os.getenv("OLLAMA_TIMEOUT", "60")))
 
 SYSTEM_PROMPT_BASE = (
-    "You are a professional manga/manhwa/manhua translator. "
-    "Translate the given Chinese or Japanese text into natural Vietnamese only. "
-    "Preserve tone, character names, and formatting. "
-    "Do not add explanations, commentary, extra text, or the original Chinese/Japanese source. "
-    "Return only the translated Vietnamese content in the requested format."
+    "You are a senior Chinese-to-Vietnamese visual novel translator. "
+    "You specialize in natural, emotional dialogue that fits inside tight speech bubbles.\n"
+    "Rules:\n"
+    "1. NATURAL: translate into colloquial Vietnamese that matches the speaker's tone and emotion.\n"
+    "2. CONCISE: the Vietnamese must be no longer than the source text — cut filler words aggressively.\n"
+    "3. CONTEXT: each numbered item is one speech bubble; treat related bubbles as part of the same conversation.\n"
+    "4. CLEAN: return ONLY Vietnamese text — no Chinese, no romanization, no explanations.\n"
+    "5. FORMAT: return a JSON array of strings in the same order as input."
 )
 
 
 def build_prompt(lines: List[str], glossary: Optional[Dict[str, str]] = None, character_names: Optional[List[str]] = None) -> str:
     prompt: List[str] = []
     if character_names:
-        prompt.append(f"Character names: {', '.join(character_names)}.")
+        prompt.append(f"Character names (keep as-is): {', '.join(character_names)}.")
     if glossary:
         entries = ", ".join([f'"{k}" -> "{v}"' for k, v in glossary.items()])
-        prompt.append(f"Use this glossary when translating: {entries}.")
-    prompt.append("Translate these lines (Chinese, Japanese, or English) into Vietnamese only. Return Vietnamese only, not the source text.")
+        prompt.append(f"Glossary (use exactly): {entries}.")
+    prompt.append(
+        "Translate each numbered speech bubble from Chinese into concise Vietnamese.\n"
+        "- Each number = one bubble; keep translations tight to avoid overflowing the text box.\n"
+        "- Prefer short natural phrases over long formal sentences.\n"
+        "- If a bubble trails off (e.g. ends with '...'), preserve that feeling."
+    )
     for idx, line in enumerate(lines, start=1):
         prompt.append(f"{idx}. {line}")
-    prompt.append("Return the translated lines as a JSON array of strings in the same order.")
+    prompt.append('\nReturn ONLY a JSON array of strings, same count and order. Example: ["Câu 1.", "Câu 2."]')
     return "\n".join(prompt)
 
 
@@ -107,7 +115,192 @@ def extract_content_from_response(data: dict, endpoint: str) -> str:
     raise ValueError(f"Unexpected LMStudio/Qwen response format from {endpoint}: {data}")
 
 
+def _try_parse_json_relaxed(text: str):
+    """Try json.loads first, then convert Python-repr single-quoted strings to JSON."""
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    # Replace Python single-quoted strings with double-quoted JSON.
+    # Strategy: replace ' with " only around keys/values, preserving apostrophes inside values.
+    # Simple but effective: replace outer single quotes on keys and on string values.
+    try:
+        # Replace single-quoted keys: 'key' -> "key"
+        converted = re.sub(r"'([^'\\]*(?:\\.[^'\\]*)*)'", lambda m: '"' + m.group(1).replace('"', '\\"') + '"', text)
+        return json.loads(converted)
+    except Exception:
+        pass
+    return None
+
+
+def parse_vision_json_response(response_text: str, count: int) -> List[str]:
+    """Parse vision response that may be {"translations":[{box_id, vietnamese_text}]} or a plain JSON array.
+    Returns a list of translated strings indexed 0..count-1."""
+    trimmed = response_text.strip()
+    # Strip markdown code fences if present
+    trimmed = re.sub(r"^```[a-zA-Z]*\s*", "", trimmed)
+    trimmed = re.sub(r"\s*```$", "", trimmed).strip()
+
+    # Try structured format: {"translations": [{box_id, vietnamese_text, ...}]}
+    # Handles both valid JSON (double quotes) and Python-repr (single quotes).
+    data = _try_parse_json_relaxed(trimmed)
+    if data and isinstance(data, dict) and "translations" in data:
+        items = data["translations"]
+        result: List[str] = [""] * count
+        for item in items:
+            bid = item.get("box_id")
+            text = str(item.get("vietnamese_text", "")).strip()
+            if bid is not None and 1 <= int(bid) <= count:
+                result[int(bid) - 1] = text
+        if any(r for r in result):
+            logger.debug("Vision JSON response parsed via box_id mapping (%d/%d filled).", sum(1 for r in result if r), count)
+            return result
+
+    # If we got a JSON array of dicts (list format), try extracting vietnamese_text by position.
+    if data and isinstance(data, list) and data and isinstance(data[0], dict):
+        by_id: List[str] = [""] * count
+        by_pos: List[str] = []
+        for item in data:
+            bid = item.get("box_id")
+            text = str(item.get("vietnamese_text", "")).strip()
+            by_pos.append(text)
+            if bid is not None and 1 <= int(bid) <= count:
+                by_id[int(bid) - 1] = text
+        if any(r for r in by_id):
+            return by_id
+        if by_pos:
+            return by_pos[:count]
+
+    # Regex fallback: extract vietnamese_text values from Python-style repr strings in a list.
+    # Handles: ["{'box_id': 1, 'vietnamese_text': 'Xin chào'}", ...]
+    viet_values = re.findall(r"['\"]vietnamese_text['\"]\s*:\s*['\"]([^'\"]+)['\"]", trimmed)
+    if viet_values:
+        result = [""] * count
+        # Also try to find box_id pairings
+        pairs = re.findall(r"['\"]box_id['\"]\s*:\s*(\d+).*?['\"]vietnamese_text['\"]\s*:\s*['\"]([^'\"]+)['\"]", trimmed, re.S)
+        if pairs and len(pairs) == len(viet_values):
+            for bid_str, text in pairs:
+                bid = int(bid_str)
+                if 1 <= bid <= count:
+                    result[bid - 1] = text.strip()
+        else:
+            for i, text in enumerate(viet_values[:count]):
+                result[i] = text.strip()
+        if any(r for r in result):
+            logger.info("Vision response parsed via regex vietnamese_text extraction (%d items).", sum(1 for r in result if r))
+            return result
+
+    # Fall back to existing generic parser
+    return parse_response(response_text, count)
+
+
 TRANSLATION_MEMORY: Dict[str, str] = {}
+
+CJK_RE = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf]')
+
+
+def _is_untranslated(result: List[str], sources: List[str]) -> bool:
+    """Return True if the model echoed the source text instead of translating."""
+    cjk_count = sum(1 for r in result if r.strip() and CJK_RE.search(r))
+    if cjk_count > len(result) * 0.5:
+        logger.warning("Vision result looks untranslated (%d/%d items contain CJK).", cjk_count, len(result))
+        return True
+    identical = sum(1 for r, s in zip(result, sources) if r.strip() == s.strip())
+    if identical > len(sources) * 0.5:
+        logger.warning("Vision result identical to source (%d/%d items).", identical, len(sources))
+        return True
+    return False
+
+
+def _build_vision_user_prompt(texts: List[str], glossary: Optional[Dict[str, str]], character_names: Optional[List[str]]) -> str:
+    """Build the user-turn message for the vision request — avoids conflicting format instructions from build_prompt()."""
+    parts: List[str] = []
+    if character_names:
+        parts.append(f"Tên nhân vật (giữ nguyên): {', '.join(character_names)}.")
+    if glossary:
+        entries = ", ".join([f'"{k}" → "{v}"' for k, v in glossary.items()])
+        parts.append(f"Bảng thuật ngữ: {entries}.")
+    parts.append(f"Dưới đây là {len(texts)} bong bóng thoại OCR cần DỊCH sang tiếng Việt:")
+    for idx, line in enumerate(texts, start=1):
+        parts.append(f"{idx}. {line}")
+    parts.append(
+        "\nTRẢ VỀ JSON NGAY theo định dạng system prompt. "
+        "Mỗi vietnamese_text PHẢI là tiếng Việt, không chứa chữ Hán."
+    )
+    return "\n".join(parts)
+
+VISION_SYSTEM_PROMPT = (
+    "Bạn là chuyên gia dịch thuật Manga (Trung → Việt). Nhiệm vụ của bạn là DỊCH, không phải nhận dạng chữ.\n"
+    "\n"
+    "BƯỚC 1: QUÉT THỊ GIÁC\n"
+    "- Nhìn vào hình ảnh, đọc TOÀN BỘ các cụm chữ tiếng Trung, kể cả chữ dọc từ phải sang trái.\n"
+    "- Sửa lỗi OCR bằng cách đối chiếu với hình ảnh thực tế.\n"
+    "\n"
+    "BƯỚC 2: DỊCH SANG TIẾNG VIỆT\n"
+    "- Bắt buộc dịch sang tiếng Việt — KHÔNG được trả về chữ Trung Quốc trong kết quả.\n"
+    "- Dịch tự nhiên, súc tích. Ví dụ: '老师' → 'cô giáo', '用这个' → 'dùng cái này'.\n"
+    "- Giữ '...' hoặc '!' cuối câu. Bản dịch phải ngắn gọn để khớp bong bóng thoại.\n"
+    "\n"
+    "BƯỚC 3: TRẢ VỀ JSON (bắt buộc, không giải thích thêm)\n"
+    "{\"translations\": [{\"box_id\": 1, \"vietnamese_text\": \"<tiếng Việt>\"}]}\n"
+    "box_id khớp với số thứ tự 1-based của bong bóng trong danh sách đầu vào.\n"
+    "CẢNH BÁO: Nếu vietnamese_text chứa chữ Hán, kết quả sẽ bị từ chối."
+)
+
+
+def translate_with_vision(
+    image_data: str,
+    texts: List[str],
+    glossary: Optional[Dict[str, str]] = None,
+    character_names: Optional[List[str]] = None,
+) -> List[str]:
+    """Vision-enhanced translation: sends image + OCR text to the LLM so it can correct OCR errors.
+    Falls back to text-only translation if the model does not support vision."""
+    if not texts:
+        return []
+
+    try:
+        user_prompt = _build_vision_user_prompt(texts, glossary, character_names)
+        img_url = image_data if image_data.startswith("data:") else f"data:image/png;base64,{image_data}"
+        max_tokens = max(2048, len(texts) * 200)
+
+        vision_payload = {
+            "model": LMSTUDIO_MODEL,
+            "messages": [
+                {"role": "system", "content": VISION_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": img_url}},
+                        {"type": "text", "text": user_prompt},
+                    ],
+                },
+            ],
+            "temperature": 0.4,
+            "max_tokens": max_tokens,
+            "top_p": 0.9,
+            "repeat_penalty": 1.1,
+        }
+
+        endpoint = f"{LMSTUDIO_URL}/v1/chat/completions"
+        response = requests.post(endpoint, json=vision_payload, timeout=(10, LMSTUDIO_TIMEOUT))
+
+        if response.status_code == 200:
+            data = response.json()
+            content = extract_content_from_response(data, endpoint)
+            result = parse_vision_json_response(content, len(texts))
+            if result and any(r.strip() for r in result) and not _is_untranslated(result, texts):
+                logger.info("Vision-enhanced translation succeeded for %d bubbles.", len(texts))
+                return result
+            logger.warning("Vision translation output rejected (untranslated or echoed source) — falling back.")
+        else:
+            logger.warning(
+                "Vision translation returned status %s — falling back to text-only.", response.status_code
+            )
+    except Exception as exc:
+        logger.warning("Vision translation error (%s) — falling back to text-only.", exc)
+
+    return translate_text_blocks(texts, glossary=glossary, character_names=character_names)
 
 
 def build_cache_key(text: str, glossary: Optional[Dict[str, str]], character_names: Optional[List[str]]) -> str:
@@ -139,31 +332,35 @@ def translate_text_blocks(lines: List[str], glossary: Optional[Dict[str, str]] =
                 LMSTUDIO_MODEL,
             )
 
+        max_tokens = max(2048, len(missing_lines) * 200)
         chat_payload = {
             "model": LMSTUDIO_MODEL,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT_BASE},
                 {"role": "user", "content": build_prompt(missing_lines, glossary, character_names)},
             ],
-            "temperature": 0.2,
-            "max_tokens": 1100,
+            "temperature": 0.35,
+            "max_tokens": max_tokens,
             "top_p": 0.9,
+            "repeat_penalty": 1.1,
         }
 
         qwen_payload = {
             "model": LMSTUDIO_MODEL,
             "system_prompt": SYSTEM_PROMPT_BASE,
             "input": build_prompt(missing_lines, glossary, character_names),
-            "temperature": 0.2,
+            "temperature": 0.35,
             "top_p": 0.9,
+            "repeat_penalty": 1.1,
         }
 
         text_payload = {
             "model": LMSTUDIO_MODEL,
             "prompt": build_prompt(missing_lines, glossary, character_names),
-            "temperature": 0.2,
-            "max_tokens": 1100,
+            "temperature": 0.35,
+            "max_tokens": max_tokens,
             "top_p": 0.9,
+            "repeat_penalty": 1.1,
         }
 
         endpoints = [

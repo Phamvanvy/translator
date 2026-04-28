@@ -105,7 +105,9 @@ function createUI() {
     .region-box { position: fixed; border: 2px dashed #38bdf8; background: rgba(56, 189, 248, 0.16); pointer-events: none; display: none; }
     .annotation-layer { position: fixed; inset: 0; pointer-events: none; }
     .cleaned-overlay { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; background-repeat: no-repeat; background-position: top left; background-size: contain; opacity: 0.96; z-index: 0; }
-    .annotation-box { position: absolute; background: rgba(0,0,0,0.92); color: #f8fafc; padding: 4px 8px; font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; font-weight: 500; box-sizing: border-box; }
+    .annotation-box { position: absolute; display: flex; align-items: flex-start; justify-content: center; background: rgba(10, 10, 12, 0.92); backdrop-filter: blur(8px) saturate(1.4); -webkit-backdrop-filter: blur(8px) saturate(1.4); border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 6px; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.6); padding: 6px 8px; box-sizing: border-box; z-index: 10000; overflow: hidden; }
+    .annotation-text { color: #ffffff; font-size: 16px; font-family: 'Be Vietnam Pro', 'Lexend', 'Segoe UI', ui-sans-serif, sans-serif; font-weight: 600; line-height: 1.4; text-align: center; text-shadow: 0 1px 3px rgba(0,0,0,0.9); word-break: break-word; white-space: pre-wrap; letter-spacing: 0; }
+    .annotation-text.long { font-size: 14px; line-height: 1.35; }
   `;
 
   const root = document.createElement("div");
@@ -170,7 +172,7 @@ function createUI() {
   selectionOverlay.addEventListener("mouseup", onSelectionMouseUp);
   selectionOverlay.addEventListener("mouseleave", onSelectionMouseLeave);
 
-  window.addEventListener("scroll", clearAnnotations, true);
+  window.addEventListener("scroll", clearAnnotations);
   window.addEventListener("resize", clearAnnotations);
 
   updateButtons();
@@ -744,21 +746,24 @@ function cropDataUrl(dataUrl, rect) {
   return new Promise((resolve, reject) => {
     const image = new Image();
     image.onload = () => {
-      const dpr = window.devicePixelRatio || 1;
+      // Compute the actual scale of the screenshot image vs CSS viewport.
+      // Chrome captureVisibleTab gives 1x on Windows and DPR× on macOS Retina.
+      // Using the measured ratio avoids hard-coding devicePixelRatio.
+      const scaleX = image.naturalWidth  / window.innerWidth;
+      const scaleY = image.naturalHeight / window.innerHeight;
       const canvas = document.createElement("canvas");
-      canvas.width = Math.round(rect.width * dpr);
-      canvas.height = Math.round(rect.height * dpr);
+      // Output canvas is always at CSS-pixel resolution so OCR box
+      // coordinates map 1:1 to CSS pixels — no DPR division needed later.
+      canvas.width  = Math.round(rect.width);
+      canvas.height = Math.round(rect.height);
       const ctx = canvas.getContext("2d");
       ctx.drawImage(
         image,
-        Math.round(rect.left * dpr),
-        Math.round(rect.top * dpr),
-        Math.round(rect.width * dpr),
-        Math.round(rect.height * dpr),
-        0,
-        0,
-        Math.round(rect.width * dpr),
-        Math.round(rect.height * dpr)
+        Math.round(rect.left   * scaleX),
+        Math.round(rect.top    * scaleY),
+        Math.round(rect.width  * scaleX),
+        Math.round(rect.height * scaleY),
+        0, 0, canvas.width, canvas.height
       );
       resolve(canvas.toDataURL("image/png"));
     };
@@ -804,6 +809,58 @@ function dedupeTranslatedItems(items) {
   return merged;
 }
 
+// Merge items whose bounding boxes are within `gap` physical pixels of each other.
+// This turns fragmented per-column boxes into a single speech-bubble block.
+function mergeNearbyBoxes(items, gap = 18) {
+  if (!items.length) return [];
+
+  let groups = items
+    .filter(item => (item.translation || "").trim())
+    .map(item => ({
+      box: [...item.box], // [left, top, right, bottom] physical px
+      translation: (item.translation || "").trim(),
+    }));
+
+  // Iteratively merge until stable
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const next = [];
+    const used = new Set();
+
+    for (let i = 0; i < groups.length; i++) {
+      if (used.has(i)) continue;
+      const cur = { box: [...groups[i].box], translation: groups[i].translation };
+
+      for (let j = i + 1; j < groups.length; j++) {
+        if (used.has(j)) continue;
+        const other = groups[j];
+
+        // Gap between the two boxes on each axis
+        const gapX = Math.max(0, Math.max(cur.box[0], other.box[0]) - Math.min(cur.box[2], other.box[2]));
+        const gapY = Math.max(0, Math.max(cur.box[1], other.box[1]) - Math.min(cur.box[3], other.box[3]));
+
+        if (gapX <= gap && gapY <= gap) {
+          cur.box[0] = Math.min(cur.box[0], other.box[0]);
+          cur.box[1] = Math.min(cur.box[1], other.box[1]);
+          cur.box[2] = Math.max(cur.box[2], other.box[2]);
+          cur.box[3] = Math.max(cur.box[3], other.box[3]);
+          cur.translation = cur.translation + " " + other.translation;
+          used.add(j);
+          changed = true;
+        }
+      }
+
+      next.push(cur);
+      used.add(i);
+    }
+
+    groups = next;
+  }
+
+  return groups;
+}
+
 async function requestTileTranslation(tileDataUrl, tileRect) {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), 600000);
@@ -830,8 +887,8 @@ async function requestTileTranslation(tileDataUrl, tileRect) {
       box: [
         item.box[0] + tileRect.left,
         item.box[1] + tileRect.top,
-        item.box[2],
-        item.box[3],
+        item.box[2] + tileRect.left,
+        item.box[3] + tileRect.top,
       ],
     }));
     return { results, cleaned_image: data.cleaned_image };
@@ -871,7 +928,7 @@ async function sendToServer(dataUrl, rect, cacheKey) {
   try {
     setStatus("Detecting text blobs...");
     const controller = new AbortController();
-    timeout = window.setTimeout(() => controller.abort(), 60000);
+    timeout = window.setTimeout(() => controller.abort(), 600000);
     const response = await fetch(`${SERVER_URL}/api/translate-image`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -925,39 +982,39 @@ function groupAnnotationItems(items) {
   for (const item of sorted) {
     const label = item.translation || item.text || "";
     if (!label) continue;
-    const itemMid = item.box[1] + item.box[3] / 2;
-    const group = rows.find((row) => Math.abs(row.mid - itemMid) < Math.max(24, item.box[3] * 0.6));
+    const itemMid = (item.box[1] + item.box[3]) / 2;
+    const itemH   = item.box[3] - item.box[1];
+    const group = rows.find((row) => Math.abs(row.mid - itemMid) < Math.max(24, itemH * 0.6));
     if (group) {
       group.items.push(item);
-      group.left = Math.min(group.left, item.box[0]);
-      group.top = Math.min(group.top, item.box[1]);
-      group.right = Math.max(group.right, item.box[0] + item.box[2]);
-      group.bottom = Math.max(group.bottom, item.box[1] + item.box[3]);
-      group.mid = (group.top + group.bottom) / 2;
+      group.left   = Math.min(group.left, item.box[0]);
+      group.top    = Math.min(group.top,  item.box[1]);
+      group.right  = Math.max(group.right, item.box[2]);
+      group.bottom = Math.max(group.bottom, item.box[3]);
+      group.mid    = (group.top + group.bottom) / 2;
     } else {
       rows.push({
         items: [item],
-        left: item.box[0],
-        top: item.box[1],
-        right: item.box[0] + item.box[2],
-        bottom: item.box[1] + item.box[3],
+        left:   item.box[0],
+        top:    item.box[1],
+        right:  item.box[2],
+        bottom: item.box[3],
         mid: itemMid,
       });
     }
   }
   return rows.map((row) => ({
-    left: row.left,
-    top: row.top,
-    width: Math.max(row.right - row.left, 120),
+    left:   row.left,
+    top:    row.top,
+    width:  Math.max(row.right - row.left, 120),
     height: Math.max(row.bottom - row.top, 24),
-    text: row.items.map((item) => item.translation || item.text).join(" "),
+    text:   row.items.map((item) => item.translation || item.text).join(" "),
   }));
 }
 
 function renderAnnotations(items, rect, cleanedImageUrl) {
   if (!annotationLayer) return;
   annotationLayer.innerHTML = "";
-  const dpr = window.devicePixelRatio || 1;
 
   if (cleanedImageUrl) {
     const overlay = document.createElement("div");
@@ -972,39 +1029,89 @@ function renderAnnotations(items, rect, cleanedImageUrl) {
   }
 
   const uniqueItems = dedupeTranslatedItems(items);
-  uniqueItems.forEach((item) => {
-    const raw = item.translation || item.text || "";
-    if (!raw) return;
+  const mergedGroups = mergeNearbyBoxes(uniqueItems, 30);  // 30px gap: merge fragments in same bubble without merging separate bubbles
+  const BLEED = 4; // CSS px bleed on each side to cover source glyph edges
+  const GAP   = 6; // minimum gap between two adjacent boxes after collision push
 
-    const label = raw
-      .trim()
-      .split(/\s+/)
-      .join("\n");
+  // ── Pass 1: compute ideal geometry for every group ──────────────────────────
+  // Box coordinates are in CSS pixels (cropDataUrl now outputs at CSS resolution).
+  const defs = mergedGroups
+    .map((group) => {
+      let raw = group.translation.trim();
+      if (!raw) return null;
+      // Strip leaked Python-repr dict strings: {'box_id': 1, 'vietnamese_text': 'Xin chào'}
+      const dictMatch = raw.match(/['"]\s*vietnamese_text\s*['"]\s*:\s*['"]([^'"]+)['"]/);
+      if (dictMatch) raw = dictMatch[1].trim();
+      if (!raw) return null;
 
-    const left = rect.left + item.box[0] / dpr;
-    const top = rect.top + item.box[1] / dpr;
-    const width = Math.min(Math.max(item.box[2] / dpr, 80), 120);
-    const height = Math.max(item.box[3] / dpr, 28);
+      const srcLeft   = rect.left + group.box[0] - BLEED;
+      const srcTop    = rect.top  + group.box[1] - BLEED;
+      const srcRight  = rect.left + group.box[2] + BLEED;
+      const srcBottom = rect.top  + group.box[3] + BLEED;
+      const srcW = Math.max(srcRight - srcLeft, 1);
+      const srcH = Math.max(srcBottom - srcTop, 1);
 
-    const bg = document.createElement("div");
-    bg.className = "annotation-box";
-    bg.style.left = `${left}px`;
-    bg.style.top = `${top}px`;
-    bg.style.width = `${width}px`;
-    bg.style.minHeight = `${height}px`;
-    bg.style.padding = "6px 8px";
-    bg.style.borderRadius = "10px";
-    bg.style.background = "rgba(0, 0, 0, 0.9)";
-    bg.style.color = "#f8fafc";
-    bg.style.textShadow = "0 0 3px rgba(0,0,0,0.8)";
-    bg.style.fontSize = "14px";
-    bg.style.lineHeight = "1.4";
-    bg.style.boxSizing = "border-box";
-    bg.style.whiteSpace = "pre";
-    bg.style.wordBreak = "break-word";
-    bg.style.pointerEvents = "none";
-    bg.textContent = label;
-    annotationLayer.appendChild(bg);
+      const isVerticalSrc = srcH > srcW * 1.5;
+      // Use translated text length to size the box, not source dimensions.
+      // ~8.5px per character + 20px padding; cap vertical-source boxes at 180px
+      // so they don't balloon into adjacent artwork.
+      const charW = Math.round(raw.length * 8.5) + 20;
+      const displayW = isVerticalSrc
+        ? Math.min(Math.max(charW, srcW, 80), 180)
+        : Math.min(Math.max(charW, srcW, 80), 300);
+      // minH: for vertical sources keep srcH so we cover the original column;
+      // for horizontal keep at least srcH.
+      const displayMinH = srcH;
+
+      return { raw, left: srcLeft, top: srcTop, width: displayW, minH: displayMinH };
+    })
+    .filter(Boolean);
+
+  // ── Pass 2: resolve horizontal overlaps (sort left → right, push right) ────
+  defs.sort((a, b) => a.left - b.left);
+  for (let i = 0; i < defs.length; i++) {
+    for (let j = i + 1; j < defs.length; j++) {
+      const a = defs[i], b = defs[j];
+      const overlapX = (a.left + a.width + GAP) - b.left;
+      if (overlapX > 0) {
+        // Check vertical overlap too — only push if rows actually intersect
+        const aBottom = a.top + a.minH;
+        const bBottom = b.top + b.minH;
+        const vertOverlap = Math.min(aBottom, bBottom) - Math.max(a.top, b.top);
+        if (vertOverlap > 0) {
+          b.left = a.left + a.width + GAP;
+        }
+      }
+    }
+  }
+
+  // ── Pass 3: clamp to viewport and render ────────────────────────────────────
+  defs.forEach((def) => {
+    let left = def.left;
+    let top  = def.top;
+    // Clamp horizontally
+    if (left + def.width > window.innerWidth - 8) {
+      left = Math.max(8, window.innerWidth - def.width - 8);
+    }
+    if (left < 8) left = 8;
+    // Clamp vertically: if the box bottom exceeds the viewport, shift up
+    if (top + def.minH > window.innerHeight - 8) {
+      top = Math.max(8, window.innerHeight - def.minH - 8);
+    }
+    if (top < 8) top = 8;
+
+    const box = document.createElement("div");
+    box.className = "annotation-box";
+    box.style.left      = `${left}px`;
+    box.style.top       = `${top}px`;
+    box.style.width     = `${def.width}px`;
+    box.style.maxWidth  = `${def.width}px`;
+    box.style.minHeight = `${def.minH}px`;
+    const textEl = document.createElement("span");
+    textEl.className = "annotation-text" + (def.raw.length > 30 ? " long" : "");
+    textEl.textContent = def.raw;
+    box.appendChild(textEl);
+    annotationLayer.appendChild(box);
   });
 }
 

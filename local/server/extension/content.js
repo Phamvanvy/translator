@@ -824,7 +824,7 @@ function hashImageData(imageData) {
 async function sendToServer(dataUrl, rect, cacheKey) {
   try {
     const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 60000);
+    const timeout = window.setTimeout(() => controller.abort(), 600000);
     const response = await fetch(`${SERVER_URL}/api/translate-image`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

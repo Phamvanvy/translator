@@ -1,6 +1,6 @@
 const SERVER_URL = "http://127.0.0.1:8000";
 const LMSTUDIO_URL = "http://127.0.0.1:1234";
-const LMSTUDIO_MODEL = "qwen2.5-14b-instruct";
+const LMSTUDIO_MODEL = "qwen2.5-vl-7b-instruct";
 const LMSTUDIO_TIMEOUT_MS = 60000;
 let scanMode = false;
 let selectionMode = false;
@@ -35,6 +35,7 @@ let menuPanel = null;
 let selectButton = null;
 let startButton = null;
 let clearButton = null;
+let fullFrameButton = null;
 let glossaryButton = null;
 let characterButton = null;
 let regionBox = null;
@@ -128,6 +129,7 @@ function createUI() {
     <div class="menu" id="menu">
       <h4>Auto Translator</h4>
       <button id="btn-start">Start Scan</button>
+      <button id="btn-full-frame">Scan Full Frame</button>
       <button id="btn-select">Select Region</button>
       <button id="btn-clear">Clear Region</button>
       <button id="btn-glossary">Glossary</button>
@@ -157,6 +159,8 @@ function createUI() {
   fabButton.addEventListener("mousedown", onFabMouseDown);
   fabButton.addEventListener("click", onFabClicked);
   startButton.addEventListener("click", onStartStopClicked);
+  fullFrameButton = shadow.getElementById("btn-full-frame");
+  fullFrameButton.addEventListener("click", onFullFrameClicked);
   selectButton.addEventListener("click", onSelectClicked);
   clearButton.addEventListener("click", onClearClicked);
   glossaryButton = shadow.getElementById("btn-glossary");
@@ -260,6 +264,13 @@ function onStartStopClicked() {
     startScan();
   }
   updateButtons();
+}
+
+function onFullFrameClicked() {
+  selectedRect = null;
+  hideRegionBox();
+  updateButtons();
+  scanOnce();
 }
 
 function onSelectClicked() {

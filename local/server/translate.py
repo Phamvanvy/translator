@@ -420,3 +420,378 @@ def translate_text_blocks(lines: List[str], glossary: Optional[Dict[str, str]] =
             TRANSLATION_MEMORY[cache_key] = translated
 
     return result
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Ask / Quiz mode
+# ──────────────────────────────────────────────────────────────────────────────
+
+ASK_SYSTEM_PROMPT = (
+    "Bạn là trợ lý phân tích bài trắc nghiệm / khảo sát.\n"
+    "Nhìn vào hình ảnh và danh sách text blocks được đánh số 1-based.\n"
+    "Một ảnh có thể chứa NHIỀU CÂU HỎI. Phân tích TẤT CẢ các câu hỏi có trong ảnh.\n"
+    "Mỗi câu hỏi có thể có NHIỀU ĐÁP ÁN ĐÚNG (ví dụ: câu hỏi 'chọn tất cả đáp án đúng').\n\n"
+    "Trả về JSON (không thêm gì khác ngoài JSON):\n"
+    "{\n"
+    "  \"questions\": [\n"
+    "    {\n"
+    "      \"question_text\": \"nội dung câu hỏi (copy nguyên văn)\",\n"
+    "      \"question_box_ids\": [1],\n"
+    "      \"answer_texts\": [\"đáp án đúng 1\", \"đáp án đúng 2\"],\n"
+    "      \"answer_box_ids\": [3, 5],\n"
+    "      \"explanation\": \"giải thích ngắn tại sao đáp án này đúng\"\n"
+    "    }\n"
+    "  ]\n"
+    "}\n"
+    "Quy tắc:\n"
+    "- Nếu chỉ 1 câu hỏi, vẫn trả về mảng questions có 1 phần tử.\n"
+    "- answer_box_ids và answer_texts phải là mảng (dù chỉ 1 đáp án).\n"
+    "- Nếu câu hỏi yêu cầu chọn nhiều, liệt kê hết tất cả đáp án đúng."
+)
+
+
+def _parse_ask_json(text: str) -> dict:
+    """Parse LLM ask response. Returns dict with 'questions' list."""
+    trimmed = text.strip()
+    trimmed = re.sub(r"^```[a-zA-Z]*\s*", "", trimmed)
+    trimmed = re.sub(r"\s*```$", "", trimmed).strip()
+
+    data = _try_parse_json_relaxed(trimmed)
+    if not data:
+        match = re.search(r"\{.*\}", trimmed, re.S)
+        if match:
+            data = _try_parse_json_relaxed(match.group(0))
+
+    if not data or not isinstance(data, dict):
+        return {"questions": []}
+
+    # New multi-question format
+    if "questions" in data and isinstance(data["questions"], list):
+        return data
+
+    # Backward compat: old single-question format → wrap in questions list
+    if "answer_text" in data or "answer_box_ids" in data:
+        q = {
+            "question_text": data.get("question_text", ""),
+            "question_box_ids": data.get("question_box_ids", []),
+            "answer_texts": (
+                [data["answer_text"]] if isinstance(data.get("answer_text"), str)
+                else data.get("answer_texts", [])
+            ),
+            "answer_box_ids": data.get("answer_box_ids", []),
+            "explanation": data.get("explanation", ""),
+        }
+        return {"questions": [q]}
+
+    return {"questions": []}
+
+
+def ask_question(
+    image_data: str,
+    text_blocks: List[dict],
+    qa_context: Optional[List[dict]] = None,
+) -> dict:
+    """Use vision LLM to identify the correct answer in a quiz/survey image.
+
+    Args:
+        image_data: base64 data URL of the scanned image region.
+        text_blocks: list of {"box": [l, t, r, b], "text": "..."} from OCR.
+        qa_context: optional list of relevant Q&A pairs for context.
+
+    Returns:
+        {
+            "question_text": str,
+            "answer_text": str,
+            "explanation": str,
+            "results": [{"box", "text", "box_id", "is_answer"}, ...],
+        }
+    """
+    if not text_blocks:
+        return {"question_text": "", "answer_text": "", "explanation": "", "results": []}
+
+    parts: List[str] = []
+
+    if qa_context:
+        parts.append("Tham khảo các câu hỏi tương tự trong cơ sở dữ liệu kiến thức:")
+        for qa in qa_context:
+            parts.append(f"  Q: {qa.get('question', '')}")
+            parts.append(f"  A: {qa.get('answer', '')}")
+            if qa.get("explanation"):
+                parts.append(f"  Lý do: {qa['explanation']}")
+        parts.append("")
+
+    parts.append(f"Có {len(text_blocks)} text blocks nhận diện được trong ảnh (đánh số 1-based):")
+    for idx, block in enumerate(text_blocks, 1):
+        parts.append(f"  {idx}. \"{block['text']}\"")
+
+    parts.append(
+        "\nDựa vào hình ảnh và danh sách trên, xác định câu hỏi và đáp án ĐÚNG NHẤT. "
+        "Trả về JSON theo format đã mô tả trong system prompt."
+    )
+    user_prompt = "\n".join(parts)
+
+    img_url = image_data if image_data.startswith("data:") else f"data:image/png;base64,{image_data}"
+
+    vision_payload = {
+        "model": LMSTUDIO_MODEL,
+        "messages": [
+            {"role": "system", "content": ASK_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": img_url}},
+                    {"type": "text", "text": user_prompt},
+                ],
+            },
+        ],
+        "temperature": 0.1,
+        "max_tokens": 512,
+        "top_p": 0.9,
+    }
+
+    # Text-only fallback payload (for non-vision models)
+    text_payload = {
+        "model": LMSTUDIO_MODEL,
+        "messages": [
+            {"role": "system", "content": ASK_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.1,
+        "max_tokens": 512,
+        "top_p": 0.9,
+    }
+
+    parsed: dict = {"questions": []}
+    endpoint = f"{LMSTUDIO_URL}/v1/chat/completions"
+
+    for payload in (vision_payload, text_payload):
+        try:
+            response = requests.post(endpoint, json=payload, timeout=(10, LMSTUDIO_TIMEOUT))
+            if response.status_code >= 400:
+                logger.warning("Ask LLM returned HTTP %s, trying text fallback.", response.status_code)
+                continue
+            data = response.json()
+            content = extract_content_from_response(data, endpoint)
+            parsed = _parse_ask_json(content)
+            if parsed.get("questions"):
+                total_answers = sum(len(q.get("answer_box_ids", [])) for q in parsed["questions"])
+                logger.info(
+                    "Ask question parsed: %d question(s), %d answer(s) total.",
+                    len(parsed["questions"]),
+                    total_answers,
+                )
+                break
+            logger.warning("Ask LLM response missing questions, trying text fallback.")
+        except Exception as exc:
+            logger.warning("Ask LLM call failed (%s), trying text fallback.", exc)
+
+    # Build flat set of all answer box ids across all questions
+    all_answer_ids: set = set()
+    # Map box_id -> list of question indices that consider it an answer
+    box_question_map: dict = {}
+    for q_idx, q in enumerate(parsed.get("questions", [])):
+        for raw_id in q.get("answer_box_ids", []):
+            try:
+                bid = int(raw_id)
+                all_answer_ids.add(bid)
+                box_question_map.setdefault(bid, []).append(q_idx)
+            except (ValueError, TypeError):
+                pass
+
+    results = [
+        {
+            "box": block["box"],
+            "text": block["text"],
+            "box_id": idx,
+            "is_answer": idx in all_answer_ids,
+            "question_indices": box_question_map.get(idx, []),
+        }
+        for idx, block in enumerate(text_blocks, 1)
+    ]
+
+    return {
+        "questions": parsed.get("questions", []),
+        "results": results,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Chat / follow-up question
+# ──────────────────────────────────────────────────────────────────────────────
+
+CHAT_SYSTEM_PROMPT = (
+    "Bạn là trợ lý thông minh hỗ trợ người dùng học tập và hỏi đáp.\n"
+    "Khi nhận được ảnh chứa câu hỏi trắc nghiệm, hãy:\n"
+    "1. Đọc kỹ câu hỏi và tất cả các đáp án.\n"
+    "2. Xác định đáp án ĐÚNG và giải thích ngắn gọn lý do.\n"
+    "3. Trả lời bằng tiếng Việt, rõ ràng, súc tích.\n"
+    "Không cần suy luận dài dòng — trả lời thẳng vào vấn đề.\n"
+)
+
+
+def chat_with_model(
+    message: str,
+    context: str = "",
+    history: Optional[List[dict]] = None,
+    images: Optional[List[str]] = None,
+) -> str:
+    """Send a follow-up chat message to the LLM and return the reply string."""
+    messages = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}]
+
+    if context:
+        messages.append({
+            "role": "system",
+            "content": f"Ngữ cảnh câu hỏi gần nhất:\n{context}",
+        })
+
+    for turn in (history or [])[-8:]:
+        role = turn.get("role", "user")
+        content = turn.get("content", "")
+        if role in ("user", "assistant") and content:
+            messages.append({"role": role, "content": content})
+
+    # Build current user message (with optional images for vision models)
+    if images:
+        content_parts: list = []
+        for img in images:
+            img_url = img if img.startswith("data:") else f"data:image/png;base64,{img}"
+            content_parts.append({"type": "image_url", "image_url": {"url": img_url}})
+        # Always include a text instruction; fall back to default when message is empty
+        content_parts.append({"type": "text", "text": message or "Hãy đọc ảnh và trả lời câu hỏi trong ảnh. Xác định đáp án đúng và giải thích ngắn gọn bằng tiếng Việt."})
+        messages.append({"role": "user", "content": content_parts})
+    else:
+        messages.append({"role": "user", "content": message})
+
+    payload = {
+        "model": LMSTUDIO_MODEL,
+        "messages": messages,
+        "temperature": 0.5,
+        "max_tokens": 4096,
+        "top_p": 0.9,
+    }
+
+    endpoint = f"{LMSTUDIO_URL}/v1/chat/completions"
+    try:
+        response = requests.post(endpoint, json=payload, timeout=(10, LMSTUDIO_TIMEOUT))
+        response.raise_for_status()
+        data = response.json()
+        return extract_content_from_response(data, endpoint).strip()
+    except Exception as exc:
+        logger.warning("Chat request failed: %s", exc)
+        raise RuntimeError(f"Chat request failed: {exc}") from exc
+
+
+from typing import Generator
+
+
+def _is_token_overflow_error(msg: str) -> bool:
+    """Detect token/context overflow or jinja template errors from LM Studio."""
+    m = msg.lower()
+    return any(k in m for k in [
+        "context_length_exceeded",
+        "no user query found",
+        "maximum context length",
+        "too many tokens",
+        "jinja template",
+        "prompt is too long",
+        "exceeds the model's maximum",
+    ])
+
+
+def chat_with_model_stream(
+    message: str,
+    context: str = "",
+    history: Optional[List[dict]] = None,
+    images: Optional[List[str]] = None,
+) -> Generator[str, None, None]:
+    """Stream chat response from LLM as SSE lines."""
+    messages = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}]
+
+    if context:
+        messages.append({
+            "role": "system",
+            "content": f"Ngữ cảnh câu hỏi gần nhất:\n{context}",
+        })
+
+    for turn in (history or [])[-8:]:
+        role = turn.get("role", "user")
+        content = turn.get("content", "")
+        if role in ("user", "assistant") and content:
+            messages.append({"role": role, "content": content})
+
+    # Build current user message (with optional images for vision models)
+    if images:
+        content_parts: list = []
+        for img in images:
+            img_url = img if img.startswith("data:") else f"data:image/png;base64,{img}"
+            content_parts.append({"type": "image_url", "image_url": {"url": img_url}})
+        content_parts.append({"type": "text", "text": message or "Hãy đọc ảnh và trả lời câu hỏi trong ảnh. Xác định đáp án đúng và giải thích ngắn gọn bằng tiếng Việt."})
+        messages.append({"role": "user", "content": content_parts})
+    else:
+        messages.append({"role": "user", "content": message})
+
+    payload = {
+        "model": LMSTUDIO_MODEL,
+        "messages": messages,
+        "temperature": 0.5,
+        "max_tokens": 4096,
+        "top_p": 0.9,
+        "stream": True,
+    }
+
+    endpoint = f"{LMSTUDIO_URL}/v1/chat/completions"
+    try:
+        with requests.post(
+            endpoint,
+            json=payload,
+            timeout=(10, LMSTUDIO_TIMEOUT),
+            stream=True,
+        ) as resp:
+            # Handle non-streaming HTTP error before iterating
+            if resp.status_code != 200:
+                try:
+                    err_data = resp.json()
+                    err_obj = err_data.get("error") or {}
+                    err_msg = (err_obj.get("message") if isinstance(err_obj, dict) else str(err_obj)) or f"HTTP {resp.status_code}"
+                except Exception:
+                    err_msg = f"HTTP {resp.status_code}"
+                err_type = "token_overflow" if _is_token_overflow_error(err_msg) else "server_error"
+                logger.warning("LMStudio returned %s: %s", resp.status_code, err_msg)
+                yield f"data: {json.dumps({'error': err_msg, 'type': err_type})}\n\n"
+                return
+
+            for raw_line in resp.iter_lines():
+                if not raw_line:
+                    continue
+                line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
+                if line.startswith("data:"):
+                    data_str = line[5:].strip()
+                    if data_str == "[DONE]":
+                        yield "data: [DONE]\n\n"
+                        return
+                    try:
+                        parsed = json.loads(data_str)
+                        # Detect error chunk inside SSE stream (LM Studio error format)
+                        if "error" in parsed:
+                            err_obj = parsed["error"]
+                            err_msg = (err_obj.get("message") if isinstance(err_obj, dict) else str(err_obj)) or "Unknown error"
+                            err_type = "token_overflow" if _is_token_overflow_error(err_msg) else "server_error"
+                            logger.warning("LMStudio stream error: %s", err_msg)
+                            yield f"data: {json.dumps({'error': err_msg, 'type': err_type})}\n\n"
+                            return
+                        token = (
+                            parsed.get("choices", [{}])[0]
+                            .get("delta", {})
+                            .get("content", "")
+                        )
+                        if token:
+                            yield f"data: {json.dumps({'token': token})}\n\n"
+                    except json.JSONDecodeError:
+                        pass
+    except Exception as exc:
+        logger.warning("Streaming chat failed: %s", exc)
+        err_msg = str(exc)
+        err_type = "token_overflow" if _is_token_overflow_error(err_msg) else "server_error"
+        yield f"data: {json.dumps({'error': err_msg, 'type': err_type})}\n\n"
+    finally:
+        yield "data: [DONE]\n\n"

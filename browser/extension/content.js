@@ -109,7 +109,7 @@ function createUI() {
     .menu { position: fixed; right: 18px; bottom: 82px; width: 220px; background: rgba(14, 18, 24, 0.95); border-radius: 18px; padding: 12px; box-shadow: 0 24px 60px rgba(0,0,0,0.28); color: #f8fafc; font-family: ui-sans-serif, system-ui, sans-serif; pointer-events: auto; display: none; }
     .menu.open { display: block; }
     .menu h4 { margin: 0 0 8px; font-size: 14px; color: #cbd5e1; }
-    .menu button { width: 100%; border: none; border-radius: 12px; padding: 10px 12px; margin: 6px 0; font-size: 13px; background: rgba(255,255,255,0.08); color: #f8fafc; cursor: pointer; transition: background .2s ease; }
+    .menu button { border: none; border-radius: 12px; padding: 10px 12px; margin: 6px 0; font-size: 13px; background: rgba(255,255,255,0.08); color: #f8fafc; cursor: pointer; transition: background .2s ease; }
     .menu button:hover { background: rgba(255,255,255,0.16); }
     .status { margin-top: 8px; font-size: 12px; color: #94a3b8; }
     .status strong { color: #e2e8f0; }

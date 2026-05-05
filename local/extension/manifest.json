@@ -40,7 +40,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "js": ["content.js", "content-scan.js", "content-chat.js"],
       "run_at": "document_idle"
     }
   ],

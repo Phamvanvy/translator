@@ -102,7 +102,92 @@ Nếu không có file này trong extension, Tesseract sẽ cố gắng tải mod
 ## Notes
 
 - `local/server/ocr.py` dùng `PaddleOCR` để nhận diện chữ.
-- `local/server/translate.py` gọi LMStudio local API.
+- `local/server/translate.py` gọi LMStudio local API (dịch + ask).
+- `local/server/qa_store.py` lưu Q&A knowledge base vào `qa_knowledge.json`.
 - `local/server/extension/content.js` dùng `IntersectionObserver` và debounce để chụp ảnh tự động.
 - `local/server/extension/background.js` dùng `chrome.tabs.captureVisibleTab` để lấy ảnh chất lượng cao.
 - `browser/extension/content.js` và `browser/extension/tesseract` hỗ trợ OCR trong trình duyệt.
+
+---
+
+## Tính năng Hỏi đáp (Ask / Quiz Mode)
+
+### Tổng quan
+
+Ngoài chế độ dịch ảnh, extension hỗ trợ thêm chế độ **Hỏi đáp** — scan ảnh chứa câu hỏi trắc nghiệm (bài kiểm tra, khảo sát, v.v.), gửi đến LM Studio, và nhận về đáp án đúng được **khoanh đỏ** trực tiếp trên màn hình.
+
+### Cách dùng
+
+**Bước 1: Chọn chế độ**
+
+Mở menu extension (nhấn vào nút 🔎 ở góc dưới phải), sau đó nhấn nút **❓ Hỏi đáp** để chuyển sang chế độ Ask. Nút sẽ sáng xanh khi được chọn.
+
+**Bước 2: Chọn vùng (tùy chọn)**
+
+Nhấn **Select Region** và kéo thả để khoanh vùng câu hỏi trên màn hình.
+
+**Bước 3: Scan**
+
+Nhấn **Start Scan**. Extension sẽ:
+1. Chụp ảnh vùng đã chọn
+2. OCR nhận diện toàn bộ text
+3. Gửi đến LM Studio với prompt nhận diện câu hỏi + đáp án
+4. Hiển thị:
+   - **Khung đỏ** bao quanh đáp án đúng
+   - **Panel kết quả** phía dưới vùng scan: câu hỏi + đáp án + giải thích
+
+**Bước 4: Quản lý Q&A Knowledge Base (tùy chọn)**
+
+Để cải thiện độ chính xác, bạn có thể lưu sẵn các câu hỏi và đáp án. Nhấn nút **Q&A Database** trong menu:
+
+- **Tùy chọn 1**: Thêm câu hỏi mới (nhập câu hỏi → đáp án → giải thích)
+- **Tùy chọn 2**: Xem số lượng câu hỏi đã lưu
+- **Tùy chọn 3**: Xóa câu hỏi theo ID
+
+Hoặc quản lý trực tiếp qua API (Swagger UI tại `http://localhost:8000/docs`):
+
+```bash
+# Thêm câu hỏi
+curl -X POST http://localhost:8000/api/qa \
+  -H "Content-Type: application/json" \
+  -d '{"question": "Câu hỏi?", "answer": "Đáp án đúng", "explanation": "Vì..."}'
+
+# Xem danh sách
+curl http://localhost:8000/api/qa
+
+# Xóa theo ID
+curl -X DELETE http://localhost:8000/api/qa/1
+```
+
+### API endpoint mới
+
+| Method | Endpoint | Mô tả |
+|--------|----------|-------|
+| `POST` | `/api/ask` | Scan ảnh, trả về đáp án đúng |
+| `GET` | `/api/qa` | Lấy toàn bộ Q&A knowledge base |
+| `POST` | `/api/qa` | Thêm Q&A entry mới |
+| `DELETE` | `/api/qa/{id}` | Xóa Q&A entry theo ID |
+
+### Response `/api/ask`
+
+```json
+{
+  "question_text": "Bạn nên làm gì nếu máy tính bị nhiễm virus?",
+  "answer_text": "Tắt máy hoặc ngắt mạng (Wifi hoặc mạng LAN)",
+  "explanation": "Ngắt kết nối mạng ngay lập tức để ngăn virus lây lan.",
+  "results": [
+    { "box": [10, 20, 400, 50], "text": "Câu hỏi...", "box_id": 1, "is_answer": false },
+    { "box": [10, 60, 400, 90], "text": "Tắt máy hoặc ngắt mạng...", "box_id": 2, "is_answer": true }
+  ]
+}
+```
+
+### Yêu cầu model
+
+Chế độ Ask dùng vision LLM để xem cả ảnh lẫn text. Model trong `.env` nên hỗ trợ vision:
+
+```env
+LMSTUDIO_MODEL=qwen3.5-9b-vlm
+```
+
+Nếu model không hỗ trợ vision, server sẽ tự fallback sang text-only prompt.

@@ -66,12 +66,16 @@ class ImageTranslateRequest(BaseModel):
     character_names: Optional[List[str]] = None
     domain_id: Optional[str] = None
     tab_id: Optional[int] = None
+    llm_url: Optional[str] = None
+    llm_model: Optional[str] = None
 
 
 class AskRequest(BaseModel):
     image: str
     lang: str = "ch"
     domain_id: Optional[str] = None
+    llm_url: Optional[str] = None
+    llm_model: Optional[str] = None
 
 
 class QAEntryRequest(BaseModel):
@@ -139,6 +143,8 @@ def api_translate_image(request: ImageTranslateRequest):
             texts,
             glossary=merged_glossary,
             character_names=request.character_names,
+            llm_url=request.llm_url,
+            llm_model=request.llm_model,
         )
 
         if len(translations) != len(merged) and translations:
@@ -194,7 +200,13 @@ def api_ask(request: AskRequest):
         all_text = " ".join(b["text"] for b in text_blocks)
         qa_context = find_relevant_qa(all_text, top_k=5) if text_blocks else []
 
-        result = ask_question(request.image, text_blocks, qa_context)
+        result = ask_question(
+            request.image,
+            text_blocks,
+            qa_context,
+            llm_url=request.llm_url,
+            llm_model=request.llm_model,
+        )
         return result
     except Exception as exc:
         logger.exception("Ask request failed")

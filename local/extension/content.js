@@ -33,6 +33,7 @@ let annotationLayer = null;
 let shadowRoot = null;
 let lastCaptureTimestamp = 0;
 let fabDragState = { active: false, moved: false, startX: 0, startY: 0, originLeft: 0, originTop: 0 };
+let llmButton = null;
 // Chat state (shared with content-chat.js)
 let attachedChatImages = []; // array of base64 data URLs
 let lastAskContext = "";     // context for follow-up questions
@@ -173,6 +174,7 @@ function createUI() {
         <button id="btn-clear">Clear Region</button>
         <button id="btn-glossary">Glossary</button>
         <button id="btn-characters">Character Names</button>
+        <button id="btn-llm">LLM backend</button>
         <button id="btn-qa">Q&amp;A Database</button>
         <button id="btn-lang">OCR: Chinese</button>
         <div class="status">Status: <strong id="status">Idle</strong></div>
@@ -219,6 +221,8 @@ function createUI() {
   glossaryButton.addEventListener("click", onGlossaryClicked);
   characterButton = shadow.getElementById("btn-characters");
   characterButton.addEventListener("click", onCharacterClicked);
+  llmButton = shadow.getElementById("btn-llm");
+  llmButton.addEventListener("click", onLLMSettingsClicked);
 
   shadow.getElementById("tab-btn-control").addEventListener("click", () => switchTab("control"));
   shadow.getElementById("tab-btn-chat").addEventListener("click", () => switchTab("chat"));
@@ -226,6 +230,7 @@ function createUI() {
   shadow.getElementById("btn-mode-translate").addEventListener("click", () => setAppMode("translate"));
   shadow.getElementById("btn-mode-ask").addEventListener("click", () => setAppMode("ask"));
   updateModeUI();
+  updateLLMButton();
 
   shadow.getElementById("btn-qa").addEventListener("click", onQAClicked);
   shadow.getElementById("btn-upload-ask").addEventListener("click", () => onUploadAskClicked());
@@ -393,6 +398,53 @@ function onClearClicked() {
   hideRegionBox();
   setStatus("Region cleared.");
   updateButtons();
+}
+
+function getLLMSettings() {
+  return {
+    llmUrl: localStorage.getItem("autoScanLLMUrl") || "",
+    llmModel: localStorage.getItem("autoScanLLMModel") || "",
+  };
+}
+
+function saveLLMSettings(url, model) {
+  if (url) localStorage.setItem("autoScanLLMUrl", url);
+  else localStorage.removeItem("autoScanLLMUrl");
+  if (model) localStorage.setItem("autoScanLLMModel", model);
+  else localStorage.removeItem("autoScanLLMModel");
+  updateLLMButton();
+}
+
+function updateLLMButton() {
+  if (!llmButton) return;
+  const { llmUrl, llmModel } = getLLMSettings();
+  if (llmUrl || llmModel) {
+    const shortUrl = llmUrl ? llmUrl.replace(/^https?:\/\//, "") : "env";
+    const shortModel = llmModel || "env";
+    llmButton.textContent = `LLM: ${shortUrl} / ${shortModel}`;
+  } else {
+    llmButton.textContent = "LLM backend";
+  }
+}
+
+function onLLMSettingsClicked() {
+  const current = getLLMSettings();
+  const url = window.prompt(
+    "LLM server URL (leave empty to use server env var):",
+    current.llmUrl
+  );
+  if (url === null) return;
+  const model = window.prompt(
+    "LLM model name (leave empty to use server env var):",
+    current.llmModel
+  );
+  if (model === null) return;
+  saveLLMSettings(url.trim(), model.trim());
+  if (url.trim() || model.trim()) {
+    setStatus("LLM override saved. Scan will send override settings to the local server.");
+  } else {
+    setStatus("LLM override cleared. Server env vars will be used.");
+  }
 }
 
 function setAppMode(mode) {

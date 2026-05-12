@@ -123,12 +123,13 @@ async function initiateCapture(rect, prefetchRect) {
         const croppedImageData = await getImageDataFromDataUrl(croppedDataUrl);
         const cacheKey = hashImageData(croppedImageData);
 
-        const prefetchDataUrl = prefetchRect && (
-          prefetchRect.left !== rect.left || prefetchRect.top !== rect.top ||
-          prefetchRect.width !== rect.width || prefetchRect.height !== rect.height
-        ) ? await cropDataUrl(response.dataUrl, prefetchRect) : croppedDataUrl;
-        const prefetchImageData = await getImageDataFromDataUrl(prefetchDataUrl);
-        const prefetchHash = hashImageData(prefetchImageData);
+        const prefetchSame = !prefetchRect || (
+          prefetchRect.left === rect.left && prefetchRect.top === rect.top &&
+          prefetchRect.width === rect.width && prefetchRect.height === rect.height
+        );
+        const prefetchDataUrl = prefetchSame ? croppedDataUrl : await cropDataUrl(response.dataUrl, prefetchRect);
+        const prefetchImageData = prefetchSame ? croppedImageData : await getImageDataFromDataUrl(prefetchDataUrl);
+        const prefetchHash = prefetchSame ? cacheKey : hashImageData(prefetchImageData);
 
         if (lastPrefetchData && !hasFrameChanged(lastPrefetchData, prefetchImageData)) {
           setStatus("No visual change detected in buffered viewport.");
@@ -263,8 +264,25 @@ function mergeNearbyBoxes(items, gap = 18) {
   return groups;
 }
 
+function getLLMOverridePayload() {
+  const payload = {};
+  const llmUrl = localStorage.getItem("autoScanLLMUrl") || "";
+  const llmModel = localStorage.getItem("autoScanLLMModel") || "";
+  if (llmUrl) payload.llm_url = llmUrl;
+  if (llmModel) payload.llm_model = llmModel;
+  return payload;
+}
+
 async function requestTileTranslation(tileDataUrl, tileRect) {
-  const body = JSON.stringify({ image: tileDataUrl, lang: ocrLang, glossary, character_names: characterNames, domain_id: getDomainId(), tab_id: currentTabId });
+  const body = JSON.stringify({
+    image: tileDataUrl,
+    lang: ocrLang,
+    glossary,
+    character_names: characterNames,
+    domain_id: getDomainId(),
+    tab_id: currentTabId,
+    ...getLLMOverridePayload(),
+  });
   const resp = await new Promise((resolve, reject) => {
     const tid = setTimeout(() => reject(new Error("Request timed out")), 600000);
     chrome.runtime.sendMessage({ action: "proxyFetch", url: `${SERVER_URL}/api/translate-image`, method: "POST", body }, (r) => {
@@ -309,7 +327,15 @@ async function sendToServer(dataUrl, rect, cacheKey) {
   if (appMode === "ask") return sendToServerAsk(dataUrl, rect);
   try {
     setStatus("Detecting text blobs...");
-    const body = JSON.stringify({ image: dataUrl, lang: ocrLang, glossary, character_names: characterNames, domain_id: getDomainId(), tab_id: currentTabId });
+    const body = JSON.stringify({
+      image: dataUrl,
+      lang: ocrLang,
+      glossary,
+      character_names: characterNames,
+      domain_id: getDomainId(),
+      tab_id: currentTabId,
+      ...getLLMOverridePayload(),
+    });
     const result = await new Promise((resolve, reject) => {
       const tid = setTimeout(() => reject(new Error("AbortError")), 600000);
       chrome.runtime.sendMessage({ action: "proxyFetch", url: `${SERVER_URL}/api/translate-image`, method: "POST", body }, (r) => {
@@ -456,10 +482,18 @@ async function scanFullPage() {
     appendChatMessage("bot", `<em>📸 Capturing full page (${scrollTargets.length} sections)...</em>`);
 
     const sectionDataUrls = [];
+    let lastSectionHash = null;
+    let lastScrollY = 0;
     for (let i = 0; i < scrollTargets.length && scanMode; i++) {
       if (i > 0) {
         window.scrollTo({ top: scrollTargets[i], behavior: "instant" });
         await new Promise(r => setTimeout(r, 500));
+        const currentScrollY = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+        if (currentScrollY === lastScrollY) {
+          setStatus("Scrolling did not change viewport, stopping capture.");
+          break;
+        }
+        lastScrollY = currentScrollY;
       }
       setStatus(`Capturing section ${i + 1}/${scrollTargets.length}...`);
 
@@ -475,7 +509,20 @@ async function scanFullPage() {
           }
         });
       });
-      if (dataUrl) sectionDataUrls.push(dataUrl);
+      if (!dataUrl) continue;
+
+      try {
+        const imageData = await getImageDataFromDataUrl(dataUrl);
+        const hash = hashImageData(imageData);
+        if (lastSectionHash && hash === lastSectionHash) {
+          setStatus("Duplicate section detected, stopping capture.");
+          break;
+        }
+        lastSectionHash = hash;
+        sectionDataUrls.push(dataUrl);
+      } catch (err) {
+        sectionDataUrls.push(dataUrl);
+      }
     }
 
     if (sectionDataUrls.length === 0) {

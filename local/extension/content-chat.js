@@ -271,7 +271,16 @@ async function sendChatMessage(userText) {
 async function sendToServerAsk(dataUrl, rect) {
   try {
     setStatus("Analyzing question...");
-    const body = JSON.stringify({ image: dataUrl, lang: ocrLang, domain_id: getDomainId() });
+    const payload = {
+      image: dataUrl,
+      lang: ocrLang,
+      domain_id: getDomainId(),
+    };
+    const llmUrl = localStorage.getItem("autoScanLLMUrl") || "";
+    const llmModel = localStorage.getItem("autoScanLLMModel") || "";
+    if (llmUrl) payload.llm_url = llmUrl;
+    if (llmModel) payload.llm_model = llmModel;
+    const body = JSON.stringify(payload);
     const result = await new Promise((resolve, reject) => {
       const tid = setTimeout(() => reject(new Error("AbortError")), 120000);
       chrome.runtime.sendMessage({ action: "proxyFetch", url: `${SERVER_URL}/api/ask`, method: "POST", body }, (r) => {

@@ -248,11 +248,17 @@ VISION_SYSTEM_PROMPT = (
 )
 
 
+def _resolve_llm_settings(llm_url: Optional[str] = None, llm_model: Optional[str] = None):
+    return (llm_url or LMSTUDIO_URL, llm_model or LMSTUDIO_MODEL)
+
+
 def translate_with_vision(
     image_data: str,
     texts: List[str],
     glossary: Optional[Dict[str, str]] = None,
     character_names: Optional[List[str]] = None,
+    llm_url: Optional[str] = None,
+    llm_model: Optional[str] = None,
 ) -> List[str]:
     """Vision-enhanced translation: sends image + OCR text to the LLM so it can correct OCR errors.
     Falls back to text-only translation if the model does not support vision."""
@@ -260,12 +266,13 @@ def translate_with_vision(
         return []
 
     try:
+        llm_url, llm_model = _resolve_llm_settings(llm_url, llm_model)
         user_prompt = _build_vision_user_prompt(texts, glossary, character_names)
         img_url = image_data if image_data.startswith("data:") else f"data:image/png;base64,{image_data}"
         max_tokens = max(2048, len(texts) * 200)
 
         vision_payload = {
-            "model": LMSTUDIO_MODEL,
+            "model": llm_model,
             "messages": [
                 {"role": "system", "content": VISION_SYSTEM_PROMPT},
                 {
@@ -282,7 +289,7 @@ def translate_with_vision(
             "repeat_penalty": 1.1,
         }
 
-        endpoint = f"{LMSTUDIO_URL}/v1/chat/completions"
+        endpoint = f"{llm_url}/v1/chat/completions"
         response = requests.post(endpoint, json=vision_payload, timeout=(10, LMSTUDIO_TIMEOUT))
 
         if response.status_code == 200:
@@ -300,7 +307,13 @@ def translate_with_vision(
     except Exception as exc:
         logger.warning("Vision translation error (%s) — falling back to text-only.", exc)
 
-    return translate_text_blocks(texts, glossary=glossary, character_names=character_names)
+    return translate_text_blocks(
+        texts,
+        glossary=glossary,
+        character_names=character_names,
+        llm_url=llm_url,
+        llm_model=llm_model,
+    )
 
 
 def build_cache_key(text: str, glossary: Optional[Dict[str, str]], character_names: Optional[List[str]]) -> str:
@@ -309,7 +322,13 @@ def build_cache_key(text: str, glossary: Optional[Dict[str, str]], character_nam
     return f"{text}||{glossary_blob}||{chars}"
 
 
-def translate_text_blocks(lines: List[str], glossary: Optional[Dict[str, str]] = None, character_names: Optional[List[str]] = None) -> List[str]:
+def translate_text_blocks(
+    lines: List[str],
+    glossary: Optional[Dict[str, str]] = None,
+    character_names: Optional[List[str]] = None,
+    llm_url: Optional[str] = None,
+    llm_model: Optional[str] = None,
+) -> List[str]:
     if not lines:
         return []
 
@@ -326,15 +345,16 @@ def translate_text_blocks(lines: List[str], glossary: Optional[Dict[str, str]] =
             missing_lines.append(line)
 
     if missing_lines:
-        if "vl" in LMSTUDIO_MODEL.lower() or "vision" in LMSTUDIO_MODEL.lower():
+        llm_url, llm_model = _resolve_llm_settings(llm_url, llm_model)
+        if "vl" in llm_model.lower() or "vision" in llm_model.lower():
             logger.warning(
-                "LMStudio model %s looks like a vision-language model; this backend currently sends only text prompts.",
-                LMSTUDIO_MODEL,
+                "LLM model %s looks like a vision-language model; this backend currently sends only text prompts.",
+                llm_model,
             )
 
         max_tokens = max(2048, len(missing_lines) * 200)
         chat_payload = {
-            "model": LMSTUDIO_MODEL,
+            "model": llm_model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT_BASE},
                 {"role": "user", "content": build_prompt(missing_lines, glossary, character_names)},
@@ -346,7 +366,7 @@ def translate_text_blocks(lines: List[str], glossary: Optional[Dict[str, str]] =
         }
 
         qwen_payload = {
-            "model": LMSTUDIO_MODEL,
+            "model": llm_model,
             "system_prompt": SYSTEM_PROMPT_BASE,
             "input": build_prompt(missing_lines, glossary, character_names),
             "temperature": 0.35,
@@ -355,7 +375,7 @@ def translate_text_blocks(lines: List[str], glossary: Optional[Dict[str, str]] =
         }
 
         text_payload = {
-            "model": LMSTUDIO_MODEL,
+            "model": llm_model,
             "prompt": build_prompt(missing_lines, glossary, character_names),
             "temperature": 0.35,
             "max_tokens": max_tokens,
@@ -364,10 +384,10 @@ def translate_text_blocks(lines: List[str], glossary: Optional[Dict[str, str]] =
         }
 
         endpoints = [
-            (f"{LMSTUDIO_URL}/v1/chat/completions", chat_payload),
-            (f"{LMSTUDIO_URL}/api/v1/chat", qwen_payload),
-            (f"{LMSTUDIO_URL}/v1/completions", text_payload),
-            (f"{LMSTUDIO_URL}/api/generate", text_payload),
+            (f"{llm_url}/v1/chat/completions", chat_payload),
+            (f"{llm_url}/api/v1/chat", qwen_payload),
+            (f"{llm_url}/v1/completions", text_payload),
+            (f"{llm_url}/api/generate", text_payload),
         ]
         response = None
         last_exception = None
@@ -490,6 +510,8 @@ def ask_question(
     image_data: str,
     text_blocks: List[dict],
     qa_context: Optional[List[dict]] = None,
+    llm_url: Optional[str] = None,
+    llm_model: Optional[str] = None,
 ) -> dict:
     """Use vision LLM to identify the correct answer in a quiz/survey image.
 
@@ -532,8 +554,9 @@ def ask_question(
 
     img_url = image_data if image_data.startswith("data:") else f"data:image/png;base64,{image_data}"
 
+    llm_url, llm_model = _resolve_llm_settings(llm_url, llm_model)
     vision_payload = {
-        "model": LMSTUDIO_MODEL,
+        "model": llm_model,
         "messages": [
             {"role": "system", "content": ASK_SYSTEM_PROMPT},
             {
@@ -551,7 +574,7 @@ def ask_question(
 
     # Text-only fallback payload (for non-vision models)
     text_payload = {
-        "model": LMSTUDIO_MODEL,
+        "model": llm_model,
         "messages": [
             {"role": "system", "content": ASK_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
@@ -562,7 +585,7 @@ def ask_question(
     }
 
     parsed: dict = {"questions": []}
-    endpoint = f"{LMSTUDIO_URL}/v1/chat/completions"
+    endpoint = f"{llm_url}/v1/chat/completions"
 
     for payload in (vision_payload, text_payload):
         try:
@@ -634,6 +657,8 @@ def chat_with_model(
     context: str = "",
     history: Optional[List[dict]] = None,
     images: Optional[List[str]] = None,
+    llm_url: Optional[str] = None,
+    llm_model: Optional[str] = None,
 ) -> str:
     """Send a follow-up chat message to the LLM and return the reply string."""
     messages = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}]
@@ -662,15 +687,16 @@ def chat_with_model(
     else:
         messages.append({"role": "user", "content": message})
 
+    llm_url, llm_model = _resolve_llm_settings(llm_url, llm_model)
     payload = {
-        "model": LMSTUDIO_MODEL,
+        "model": llm_model,
         "messages": messages,
         "temperature": 0.5,
         "max_tokens": 4096,
         "top_p": 0.9,
     }
 
-    endpoint = f"{LMSTUDIO_URL}/v1/chat/completions"
+    endpoint = f"{llm_url}/v1/chat/completions"
     try:
         response = requests.post(endpoint, json=payload, timeout=(10, LMSTUDIO_TIMEOUT))
         response.raise_for_status()
@@ -703,6 +729,8 @@ def chat_with_model_stream(
     context: str = "",
     history: Optional[List[dict]] = None,
     images: Optional[List[str]] = None,
+    llm_url: Optional[str] = None,
+    llm_model: Optional[str] = None,
 ) -> Generator[str, None, None]:
     """Stream chat response from LLM as SSE lines."""
     messages = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}]
@@ -730,8 +758,9 @@ def chat_with_model_stream(
     else:
         messages.append({"role": "user", "content": message})
 
+    llm_url, llm_model = _resolve_llm_settings(llm_url, llm_model)
     payload = {
-        "model": LMSTUDIO_MODEL,
+        "model": llm_model,
         "messages": messages,
         "temperature": 0.5,
         "max_tokens": 4096,
@@ -739,7 +768,7 @@ def chat_with_model_stream(
         "stream": True,
     }
 
-    endpoint = f"{LMSTUDIO_URL}/v1/chat/completions"
+    endpoint = f"{llm_url}/v1/chat/completions"
     try:
         with requests.post(
             endpoint,

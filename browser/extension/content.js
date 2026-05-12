@@ -1,6 +1,6 @@
 const SERVER_URL = "http://127.0.0.1:8000";
 const LMSTUDIO_URL = "http://127.0.0.1:1234";
-const LMSTUDIO_MODEL = "qwen2.5-vl-7b-instruct";
+const LMSTUDIO_MODEL = "qwen3.5-9b-vlm";
 const LMSTUDIO_TIMEOUT_MS = 60000;
 let scanMode = false;
 let selectionMode = false;

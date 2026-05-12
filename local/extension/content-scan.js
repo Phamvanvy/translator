@@ -453,7 +453,7 @@ async function scanFullPage() {
       if (scrollTargets[scrollTargets.length - 1] < maxScrollY) scrollTargets.push(maxScrollY);
     }
 
-    appendChatMessage("bot", `<em>📸 Đang chụp toàn trang (${scrollTargets.length} phần)...</em>`);
+    appendChatMessage("bot", `<em>📸 Capturing full page (${scrollTargets.length} sections)...</em>`);
 
     const sectionDataUrls = [];
     for (let i = 0; i < scrollTargets.length && scanMode; i++) {
@@ -461,7 +461,7 @@ async function scanFullPage() {
         window.scrollTo({ top: scrollTargets[i], behavior: "instant" });
         await new Promise(r => setTimeout(r, 500));
       }
-      setStatus(`Đang chụp phần ${i + 1}/${scrollTargets.length}...`);
+      setStatus(`Capturing section ${i + 1}/${scrollTargets.length}...`);
 
       const dataUrl = await new Promise(resolve => {
         chrome.runtime.sendMessage({ action: "captureVisibleTab" }, async response => {
@@ -479,14 +479,14 @@ async function scanFullPage() {
     }
 
     if (sectionDataUrls.length === 0) {
-      setStatus("Không chụp được ảnh.", true);
+      setStatus("Unable to capture image.", true);
       return;
     }
 
     attachedChatImages = sectionDataUrls;
     updateAttachBar();
-    setStatus(`✅ Đã chụp ${sectionDataUrls.length} phần.`);
-    appendChatMessage("bot", `<em>✅ Đã chụp ${sectionDataUrls.length} phần. Nhập câu hỏi bên dưới.</em>`);
+    setStatus(`✅ Captured ${sectionDataUrls.length} sections.`);
+    appendChatMessage("bot", `<em>✅ Captured ${sectionDataUrls.length} sections. Enter your question below.</em>`);
   } finally {
     window.scrollTo({ top: originalScrollY, behavior: "smooth" });
     scanMode = false;

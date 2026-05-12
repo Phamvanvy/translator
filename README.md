@@ -1,50 +1,50 @@
 # Manga AutoScan Translator
 
-Một bản demo kiến trúc Auto-scan dịch truyện tranh bằng Chrome Extension + Local Server + LMStudio.
+A demo architecture for automatic manga translation using Chrome Extension + Local Server + LMStudio.
 
-## Kiến trúc
+## Architecture
 
-- `local/server`: FastAPI server xử lý OCR, ghép text line, quản lý glossary và gọi LMStudio hoặc backend dịch.
-- `local/server/extension`: Chrome/MV3 extension dùng local server để gửi ảnh và hiển thị overlay dịch.
-- `browser/extension`: Browser-only extension dùng Tesseract.js OCR trong trình duyệt và có thể gọi LMStudio/DeepL/Google.
+- `local/server`: FastAPI server that handles OCR, text line merging, glossary management, and calls LMStudio or a translation backend.
+- `local/server/extension`: Chrome/MV3 extension that uses the local server to send images and display a translation overlay.
+- `browser/extension`: Browser-only extension that uses Tesseract.js OCR in the browser and can call LMStudio/DeepL/Google.
 
-## Chạy thử
+## Quick start
 
-1. Tạo môi trường Python và cài thư viện:
+1. Create a Python environment and install dependencies:
 
 ```powershell
-cd d:\repos\translator\local\server
+cd e:\repos\translator\local\server
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 ```
 
-> Mặc định, PaddleX model cache sẽ được lưu trong `local/server/.paddlex` để tránh tải về `C:\Users\...`.
-> Nếu muốn dùng thư mục khác, đặt `PADDLE_PDX_CACHE_HOME` trước khi chạy server.
+> By default, the PaddleX model cache will be stored in `local/server/.paddlex` to avoid downloading to `C:\Users\...`.
+> If you want to use another folder, set `PADDLE_PDX_CACHE_HOME` before starting the server.
 >
 > ```powershell
-> $env:PADDLE_PDX_CACHE_HOME = "D:\repos\translator\local\server\.paddlex"
+> $env:PADDLE_PDX_CACHE_HOME = "E:\repos\translator\local\server\.paddlex"
 > ```
 >
-> Nếu server báo lỗi thiếu `paddlepaddle`, hãy cài thủ công:
+> If the server reports missing `paddlepaddle`, install it manually:
 >
 > ```powershell
 > pip install paddlepaddle
 > ```
 >
-> Trên Windows, nếu cài trực tiếp bị lỗi, xem hướng dẫn cài `paddlepaddle` chính thức từ trang PaddlePaddle.
+> On Windows, if direct install fails, check the official PaddlePaddle installation guide.
 >
-> Lưu ý: nếu bạn dùng model vision-language như `qwen3-vl`, backend hiện tại chỉ gửi prompt text, nên model đó có thể lỗi 500 nếu không cấu hình payload ảnh đúng.
+> Note: if you use a vision-language model such as `qwen3-vl`, the current backend only sends prompt text, so that model may return HTTP 500 if the image payload is not configured correctly.
 
-2. Chạy server:
+2. Run the server:
 
 ```powershell
 python -m uvicorn main:app --reload
 ```
 
-> Nếu `uvicorn` launcher báo lỗi do venv bị trỏ sai đường dẫn, lệnh trên sẽ dùng trực tiếp Python của môi trường hiện tại.
+> If the `uvicorn` launcher reports an error due to the venv path being wrong, the command above will use the current Python directly.
 
-3. Chạy demo OCR với ngôn ngữ tùy chọn:
+3. Run the OCR demo with an optional language:
 
 ```powershell
 python sample_scan.py --lang japan
@@ -53,141 +53,141 @@ python sample_scan.py --lang en
 python sample_scan.py --lang ch
 ```
 
-Hoặc đặt biến môi trường:
+Or set the environment variable:
 
 ```powershell
 $env:PADDLE_OCR_LANG = "japan"
 python -m uvicorn main:app --reload
 ```
 
-4. Cài extension Chrome từ `local/server/extension`.
+4. Install the Chrome extension from `local/server/extension`.
 
-5. Nếu bạn muốn dùng phiên bản browser-only, cài extension từ `browser/extension` thay vì `local/server/extension`.
+5. If you prefer the browser-only version, install the extension from `browser/extension` instead of `local/server/extension`.
 
-6. Browser-only extension dùng Tesseract.js để nhận diện chữ ngay trong trình duyệt.
-- `LMStudio` (local) để gọi endpoint tại `http://localhost:1234`
-- `DeepL` để gọi API cloud DeepL
-- `Google` để gọi Google Translate API
+6. The browser-only extension uses Tesseract.js for OCR inside the browser.
+- `LMStudio` (local) calls the endpoint at `http://localhost:1234`
+- `DeepL` calls the DeepL cloud API
+- `Google` calls the Google Translate API
 
-7. Nếu muốn chọn vùng cụ thể, nhấn nút `Chọn vùng quét` trong extension rồi kéo thả vùng mong muốn.
+7. To select a specific region, click `Select Region` in the extension and drag the desired area.
 
-### Cấu hình LMStudio
+### LMStudio configuration
 
-Nếu dùng LMStudio, đặt các biến môi trường sau trước khi chạy server:
+If you use LMStudio, set these environment variables before starting the server:
 
 ```powershell
 $env:LMSTUDIO_URL = "http://localhost:1234"
 $env:LMSTUDIO_MODEL = "qwen3.5-27b-claude-4.6-opus-reasoning-distilled-heretic-v2-i1"
 ```
 
-### Cấu hình browser-only backend
+### Browser-only backend configuration
 
-Trong `browser/extension`, mở menu extension và bấm `Backend` để chọn:
-- `LMStudio` để gọi local LMStudio
-- `DeepL` để gọi API DeepL
-- `Google` để gọi Google Translate API
+In `browser/extension`, open the extension menu and click `Backend` to choose:
+- `LMStudio` to call local LMStudio
+- `DeepL` to call the DeepL API
+- `Google` to call the Google Translate API
 
-Khi chọn `DeepL` hoặc `Google`, extension sẽ yêu cầu nhập API key phù hợp.
+When selecting `DeepL` or `Google`, the extension will ask for the appropriate API key.
 
-### Cấu hình browser-only OCR
+### Browser-only OCR configuration
 
-Browser-only extension dùng Tesseract.js để OCR trong trình duyệt. Nếu bạn muốn tránh tải model từ mạng, hãy đặt file `jpn.traineddata` vào `browser/extension/tesseract/`.
+The browser-only extension uses Tesseract.js for OCR in the browser. If you want to avoid downloading models over the network, place `jpn.traineddata` into `browser/extension/tesseract/`.
 
-Nếu không có file này trong extension, Tesseract sẽ cố gắng tải model từ `https://tessdata.projectnaptha.com/4.0.0`.
+If that file is not present in the extension, Tesseract will try to download the model from `https://tessdata.projectnaptha.com/4.0.0`.
 
-8. Nếu muốn chọn ngôn ngữ OCR trong menu extension, mặc định là `japan`.
+8. To choose OCR language in the extension menu, the default is `japan`.
 
-9. Bật Auto-scan bằng `Alt+S`.
+9. Enable Auto-scan with `Alt+S`.
 
 ## Notes
 
-- `local/server/ocr.py` dùng `PaddleOCR` để nhận diện chữ.
-- `local/server/translate.py` gọi LMStudio local API (dịch + ask).
-- `local/server/qa_store.py` lưu Q&A knowledge base vào `qa_knowledge.json`.
-- `local/server/extension/content.js` dùng `IntersectionObserver` và debounce để chụp ảnh tự động.
-- `local/server/extension/background.js` dùng `chrome.tabs.captureVisibleTab` để lấy ảnh chất lượng cao.
-- `browser/extension/content.js` và `browser/extension/tesseract` hỗ trợ OCR trong trình duyệt.
+- `local/server/ocr.py` uses `PaddleOCR` to recognize text.
+- `local/server/translate.py` calls the local LMStudio API (translate + ask).
+- `local/server/qa_store.py` stores the Q&A knowledge base in `qa_knowledge.json`.
+- `local/server/extension/content.js` uses `IntersectionObserver` and debounce to capture images automatically.
+- `local/server/extension/background.js` uses `chrome.tabs.captureVisibleTab` to capture high-quality images.
+- `browser/extension/content.js` and `browser/extension/tesseract` support OCR in the browser.
 
 ---
 
-## Tính năng Hỏi đáp (Ask / Quiz Mode)
+## Ask / Quiz Mode
 
-### Tổng quan
+### Overview
 
-Ngoài chế độ dịch ảnh, extension hỗ trợ thêm chế độ **Hỏi đáp** — scan ảnh chứa câu hỏi trắc nghiệm (bài kiểm tra, khảo sát, v.v.), gửi đến LM Studio, và nhận về đáp án đúng được **khoanh đỏ** trực tiếp trên màn hình.
+In addition to image translation, the extension also supports **Ask mode** — scan images containing multiple-choice questions, send them to LM Studio, and display the correct answer highlighted directly on screen.
 
-### Cách dùng
+### How to use
 
-**Bước 1: Chọn chế độ**
+**Step 1: Choose a mode**
 
-Mở menu extension (nhấn vào nút 🔎 ở góc dưới phải), sau đó nhấn nút **❓ Hỏi đáp** để chuyển sang chế độ Ask. Nút sẽ sáng xanh khi được chọn.
+Open the extension menu (click the 🔎 button at the bottom right), then click **❓ Ask** to switch to Ask mode. The button lights up blue when selected.
 
-**Bước 2: Chọn vùng (tùy chọn)**
+**Step 2: Select a region (optional)**
 
-Nhấn **Select Region** và kéo thả để khoanh vùng câu hỏi trên màn hình.
+Click **Select Region** and drag to crop the question area on the screen.
 
-**Bước 3: Scan**
+**Step 3: Scan**
 
-Nhấn **Start Scan**. Extension sẽ:
-1. Chụp ảnh vùng đã chọn
-2. OCR nhận diện toàn bộ text
-3. Gửi đến LM Studio với prompt nhận diện câu hỏi + đáp án
-4. Hiển thị:
-   - **Khung đỏ** bao quanh đáp án đúng
-   - **Panel kết quả** phía dưới vùng scan: câu hỏi + đáp án + giải thích
+Click **Start Scan**. The extension will:
+1. Capture the selected area
+2. OCR the recognized text
+3. Send it to LM Studio with a prompt to identify the question and answer
+4. Display:
+   - a **red box** around the correct answer
+   - a **results panel** below the scan area with the question, answer, and explanation
 
-**Bước 4: Quản lý Q&A Knowledge Base (tùy chọn)**
+**Step 4: Manage Q&A Knowledge Base (optional)**
 
-Để cải thiện độ chính xác, bạn có thể lưu sẵn các câu hỏi và đáp án. Nhấn nút **Q&A Database** trong menu:
+To improve accuracy, you can pre-store questions and answers. Click **Q&A Database** in the menu:
 
-- **Tùy chọn 1**: Thêm câu hỏi mới (nhập câu hỏi → đáp án → giải thích)
-- **Tùy chọn 2**: Xem số lượng câu hỏi đã lưu
-- **Tùy chọn 3**: Xóa câu hỏi theo ID
+- **Option 1**: Add a new question (enter question → answer → explanation)
+- **Option 2**: View the number of saved questions
+- **Option 3**: Delete a question by ID
 
-Hoặc quản lý trực tiếp qua API (Swagger UI tại `http://localhost:8000/docs`):
+Or manage it directly via the API (Swagger UI at `http://localhost:8000/docs`):
 
 ```bash
-# Thêm câu hỏi
+# Add question
 curl -X POST http://localhost:8000/api/qa \
   -H "Content-Type: application/json" \
-  -d '{"question": "Câu hỏi?", "answer": "Đáp án đúng", "explanation": "Vì..."}'
+  -d '{"question": "Question?", "answer": "Correct answer", "explanation": "Because..."}'
 
-# Xem danh sách
+# List questions
 curl http://localhost:8000/api/qa
 
-# Xóa theo ID
+# Delete by ID
 curl -X DELETE http://localhost:8000/api/qa/1
 ```
 
-### API endpoint mới
+### New API endpoints
 
-| Method | Endpoint | Mô tả |
-|--------|----------|-------|
-| `POST` | `/api/ask` | Scan ảnh, trả về đáp án đúng |
-| `GET` | `/api/qa` | Lấy toàn bộ Q&A knowledge base |
-| `POST` | `/api/qa` | Thêm Q&A entry mới |
-| `DELETE` | `/api/qa/{id}` | Xóa Q&A entry theo ID |
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/ask` | Scan an image and return the correct answer |
+| `GET` | `/api/qa` | Retrieve the full Q&A knowledge base |
+| `POST` | `/api/qa` | Add a new Q&A entry |
+| `DELETE` | `/api/qa/{id}` | Delete a Q&A entry by ID |
 
 ### Response `/api/ask`
 
 ```json
 {
-  "question_text": "Bạn nên làm gì nếu máy tính bị nhiễm virus?",
-  "answer_text": "Tắt máy hoặc ngắt mạng (Wifi hoặc mạng LAN)",
-  "explanation": "Ngắt kết nối mạng ngay lập tức để ngăn virus lây lan.",
+  "question_text": "What should you do if your computer is infected with a virus?",
+  "answer_text": "Turn off the machine or disconnect from the network (Wi-Fi or LAN)",
+  "explanation": "Disconnect immediately to prevent the virus from spreading.",
   "results": [
-    { "box": [10, 20, 400, 50], "text": "Câu hỏi...", "box_id": 1, "is_answer": false },
-    { "box": [10, 60, 400, 90], "text": "Tắt máy hoặc ngắt mạng...", "box_id": 2, "is_answer": true }
+    { "box": [10, 20, 400, 50], "text": "Question...", "box_id": 1, "is_answer": false },
+    { "box": [10, 60, 400, 90], "text": "Turn off the machine or disconnect...", "box_id": 2, "is_answer": true }
   ]
 }
 ```
 
-### Yêu cầu model
+### Model requirements
 
-Chế độ Ask dùng vision LLM để xem cả ảnh lẫn text. Model trong `.env` nên hỗ trợ vision:
+Ask mode uses a vision LLM to understand both image and text. The model in `.env` should support vision:
 
 ```env
 LMSTUDIO_MODEL=qwen3.5-9b-vlm
 ```
 
-Nếu model không hỗ trợ vision, server sẽ tự fallback sang text-only prompt.
+If the model does not support vision, the server will fall back to a text-only prompt.

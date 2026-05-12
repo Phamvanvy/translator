@@ -79,11 +79,11 @@ function updateAttachBar() {
     const img = document.createElement('img');
     img.className = 'chat-attach-thumb';
     img.src = src;
-    img.alt = 'Ảnh ' + (idx + 1);
+    img.alt = 'Image ' + (idx + 1);
     const btn = document.createElement('button');
     btn.className = 'chat-attach-remove';
     btn.textContent = '✕';
-    btn.title = 'Xóa ảnh này';
+    btn.title = 'Remove this image';
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       attachedChatImages = attachedChatImages.filter((_, i) => i !== idx);
@@ -126,22 +126,22 @@ function appendChatMessage(role, htmlContent, extraClass = "") {
 
 // ── Main chat send ────────────────────────────────────────────────────────────
 
-// Ký tự tối đa cho toàn bộ history trước khi tự reset (~4000 tokens)
+// Maximum characters for the entire history before auto-reset (~4000 tokens)
 const CHAT_HISTORY_MAX_CHARS = 14000;
 
 async function sendChatMessage(userText) {
   const images = [...attachedChatImages]; // snapshot before clearing
   clearAttachedImages();
 
-  const displayText = userText || (images.length > 0 ? `[${images.length > 1 ? images.length + ' ảnh' : 'Ảnh'} đính kèm]` : "");
+  const displayText = userText || (images.length > 0 ? `[${images.length > 1 ? images.length + ' images' : 'Image'} attached]` : "");
   if (!displayText) return;
 
-  // Auto-reset context khi quá dài
+  // Auto-reset context when it gets too long
   const totalChars = chatHistory.reduce((n, m) => n + (m.content || "").length, 0);
   if (totalChars > CHAT_HISTORY_MAX_CHARS) {
     chatHistory.length = 0;
     lastAskContext = "";
-    appendChatMessage("bot", '<em style="color:#64748b;font-size:11px">⚡ Context quá dài — đã tự động bắt đầu cuộc hội thoại mới.</em>');
+    appendChatMessage("bot", '<em style="color:#64748b;font-size:11px">⚡ Context too long — automatically started a new conversation.</em>');
   }
 
   chatHistory.push({ role: "user", content: displayText });
@@ -186,13 +186,13 @@ async function sendChatMessage(userText) {
         if (fullText) {
           msgEl.innerHTML = formatMarkdown(fullText);
         } else if (!tokenOverflow) {
-          // Không có phản hồi — hiện nút retry
+          // No response — show retry button
           msgEl.innerHTML = '';
           const retryBtn = document.createElement("button");
           retryBtn.className = "chat-retry-btn";
-          retryBtn.textContent = "🔄 Thử lại";
+          retryBtn.textContent = "🔄 Retry";
           retryBtn.addEventListener("click", async () => {
-            // Xoá bot bubble này và user bubble cuối, rồi gửi lại
+            // Delete this bot bubble and the last user bubble, then resend
             if (chatHistory.length >= 2) chatHistory.splice(-2, 2);
             else chatHistory.length = 0;
             msgEl.remove();
@@ -214,10 +214,10 @@ async function sendChatMessage(userText) {
           const parsed = JSON.parse(payload);
           if (parsed.error) {
             if (parsed.type === "token_overflow") {
-              // Đánh dấu để auto-retry sau khi promise kết thúc
+              // Mark for auto-retry after the promise completes
               tokenOverflow = true;
               if (cursor.parentNode) cursor.remove();
-              msgEl.innerHTML = '<em style="color:#f59e0b;font-size:11px">⚡ Context quá lớn — đang reset và thử lại...</em>';
+              msgEl.innerHTML = '<em style="color:#f59e0b;font-size:11px">⚡ Context too large — resetting and retrying...</em>';
               port.disconnect();
               resolve();
               return;
@@ -243,7 +243,7 @@ async function sendChatMessage(userText) {
         chatHistory.push({ role: "assistant", content: fullText });
       }
       if (!msgEl.querySelector(".chat-cursor") && msgEl.innerHTML === "") {
-        msgEl.innerHTML = formatMarkdown(fullText) || `<span style="color:#f87171">Lỗi: Kết nối bị ngắt.</span>`;
+        msgEl.innerHTML = formatMarkdown(fullText) || `<span style="color:#f87171">Error: Connection lost.</span>`;
       } else if (fullText) {
         msgEl.innerHTML = formatMarkdown(fullText);
       }
@@ -251,16 +251,16 @@ async function sendChatMessage(userText) {
     });
   });
 
-  // Auto-retry sau khi token overflow: reset history, xoá bubble cũ, gửi lại
+  // Auto-retry after token overflow: reset history, remove old bubbles, resend
   if (tokenOverflow) {
     chatHistory.length = 0;
     lastAskContext = "";
-    // Xoá user bubble vừa thêm
+    // Remove the recently added user bubble
     const allBubbles = area ? area.querySelectorAll(".chat-msg.user") : [];
     if (allBubbles.length) allBubbles[allBubbles.length - 1].remove();
-    // Xoá bot bubble "đang reset"
+    // Remove the "resetting" bot bubble
     msgEl.remove();
-    appendChatMessage("bot", '<em style="color:#64748b;font-size:11px">⚡ Context đã reset — bắt đầu cuộc hội thoại mới.</em>');
+    appendChatMessage("bot", '<em style="color:#64748b;font-size:11px">⚡ Context reset — starting a new conversation.</em>');
     attachedChatImages = [...images];
     await sendChatMessage(userText);
   }
@@ -270,7 +270,7 @@ async function sendChatMessage(userText) {
 
 async function sendToServerAsk(dataUrl, rect) {
   try {
-    setStatus("Đang phân tích câu hỏi...");
+    setStatus("Analyzing question...");
     const body = JSON.stringify({ image: dataUrl, lang: ocrLang, domain_id: getDomainId() });
     const result = await new Promise((resolve, reject) => {
       const tid = setTimeout(() => reject(new Error("AbortError")), 120000);
@@ -285,11 +285,11 @@ async function sendToServerAsk(dataUrl, rect) {
     switchTab("chat");
     const questions = result.questions || [];
     const totalAnswers = questions.reduce((s, q) => s + (q.answer_texts || []).length, 0);
-    setStatus(`✅ ${questions.length} câu, ${totalAnswers} đáp án`);
+    setStatus(`✅ ${questions.length} questions, ${totalAnswers} answers`);
 
     lastAskContext = questions.map((q, i) => {
       const ans = (q.answer_texts || []).join(", ");
-      return `Câu ${i + 1}: ${q.question_text} → Đáp án: ${ans}. ${q.explanation || ""}`;
+      return `Q${i + 1}: ${q.question_text} → Answer: ${ans}. ${q.explanation || ""}`;
     }).join("\n");
 
     if (questions.length > 0) {
@@ -298,17 +298,17 @@ async function sendToServerAsk(dataUrl, rect) {
         const color = QUESTION_COLORS[idx % QUESTION_COLORS.length];
         const answerTexts = q.answer_texts || (q.answer_text ? [q.answer_text] : []);
         if (idx > 0) html += `<hr class="chat-sep">`;
-        if (questions.length > 1) html += `<div class="chat-q-label" style="color:${color}">📋 Câu ${idx + 1}</div>`;
-        if (q.question_text) html += `<div class="chat-q-label">❓ Câu hỏi</div><div class="chat-q-text">${_escapeHtml(q.question_text)}</div>`;
-        html += `<div class="chat-a-label">✅ Đáp án</div><div class="chat-a-list">`;
+        if (questions.length > 1) html += `<div class="chat-q-label" style="color:${color}">📋 Question ${idx + 1}</div>`;
+        if (q.question_text) html += `<div class="chat-q-label">❓ Question</div><div class="chat-q-text">${_escapeHtml(q.question_text)}</div>`;
+        html += `<div class="chat-a-label">✅ Answer</div><div class="chat-a-list">`;
         answerTexts.forEach(a => { html += `<div class="chat-a-item" style="color:${color};border-color:${color}">${_escapeHtml(a)}</div>`; });
         html += `</div>`;
-        if (q.explanation) html += `<div class="chat-exp-label">💡 Giải thích</div><div class="chat-exp-text">${_escapeHtml(q.explanation)}</div>`;
+        if (q.explanation) html += `<div class="chat-exp-label">💡 Explanation</div><div class="chat-exp-text">${_escapeHtml(q.explanation)}</div>`;
       });
       appendChatMessage("bot", html);
     }
   } catch (error) {
-    if (error.message === "AbortError" || error.name === "AbortError") setStatus("Hết thời gian chờ server.", true);
+    if (error.message === "AbortError" || error.name === "AbortError") setStatus("Server timeout.", true);
     else if (error.message?.includes("Failed to fetch")) setStatus("Server offline.", true);
     else setStatus(`Lỗi Ask: ${error.message}`, true);
   }
@@ -327,7 +327,7 @@ function onUploadAskClicked() {
       const dataUrl = ev.target.result;
       const rect = { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
       switchTab("chat");
-      appendChatMessage("bot", `<em>📤 Đang phân tích ảnh: ${_escapeHtml(file.name)}...</em>`);
+      appendChatMessage("bot", `<em>📤 Analyzing image: ${_escapeHtml(file.name)}...</em>`);
       await sendToServerAsk(dataUrl, rect);
     };
     reader.readAsDataURL(file);

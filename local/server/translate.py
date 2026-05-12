@@ -42,7 +42,7 @@ def build_prompt(lines: List[str], glossary: Optional[Dict[str, str]] = None, ch
     )
     for idx, line in enumerate(lines, start=1):
         prompt.append(f"{idx}. {line}")
-    prompt.append('\nReturn ONLY a JSON array of strings, same count and order. Example: ["Câu 1.", "Câu 2."]')
+    prompt.append('\nReturn ONLY a JSON array of strings, same count and order. Example: ["Sentence 1.", "Sentence 2."]')
     return "\n".join(prompt)
 
 
@@ -172,7 +172,7 @@ def parse_vision_json_response(response_text: str, count: int) -> List[str]:
             return by_pos[:count]
 
     # Regex fallback: extract vietnamese_text values from Python-style repr strings in a list.
-    # Handles: ["{'box_id': 1, 'vietnamese_text': 'Xin chào'}", ...]
+    # Handles: ["{'box_id': 1, 'vietnamese_text': 'Hello'}", ...]
     viet_values = re.findall(r"['\"]vietnamese_text['\"]\s*:\s*['\"]([^'\"]+)['\"]", trimmed)
     if viet_values:
         result = [""] * count
@@ -216,35 +216,35 @@ def _build_vision_user_prompt(texts: List[str], glossary: Optional[Dict[str, str
     """Build the user-turn message for the vision request — avoids conflicting format instructions from build_prompt()."""
     parts: List[str] = []
     if character_names:
-        parts.append(f"Tên nhân vật (giữ nguyên): {', '.join(character_names)}.")
+        parts.append(f"Character names (keep as-is): {', '.join(character_names)}.")
     if glossary:
         entries = ", ".join([f'"{k}" → "{v}"' for k, v in glossary.items()])
-        parts.append(f"Bảng thuật ngữ: {entries}.")
-    parts.append(f"Dưới đây là {len(texts)} bong bóng thoại OCR cần DỊCH sang tiếng Việt:")
+        parts.append(f"Glossary: {entries}.")
+    parts.append(f"Below are {len(texts)} OCR speech bubbles that must be TRANSLATED into Vietnamese:")
     for idx, line in enumerate(texts, start=1):
         parts.append(f"{idx}. {line}")
     parts.append(
-        "\nTRẢ VỀ JSON NGAY theo định dạng system prompt. "
-        "Mỗi vietnamese_text PHẢI là tiếng Việt, không chứa chữ Hán."
+        "\nRETURN JSON IMMEDIATELY in the system prompt format. "
+        "Each vietnamese_text MUST be Vietnamese and contain no Chinese characters."
     )
     return "\n".join(parts)
 
 VISION_SYSTEM_PROMPT = (
-    "Bạn là chuyên gia dịch thuật Manga (Trung → Việt). Nhiệm vụ của bạn là DỊCH, không phải nhận dạng chữ.\n"
+    "You are an expert Manga translator (Chinese → Vietnamese). Your task is TRANSLATION, not OCR recognition.\n"
     "\n"
-    "BƯỚC 1: QUÉT THỊ GIÁC\n"
-    "- Nhìn vào hình ảnh, đọc TOÀN BỘ các cụm chữ tiếng Trung, kể cả chữ dọc từ phải sang trái.\n"
-    "- Sửa lỗi OCR bằng cách đối chiếu với hình ảnh thực tế.\n"
+    "STEP 1: VISION\n"
+    "- Look at the image and read ALL Chinese text blocks, including vertical text from right to left.\n"
+    "- Correct OCR errors by comparing with the actual image.\n"
     "\n"
-    "BƯỚC 2: DỊCH SANG TIẾNG VIỆT\n"
-    "- Bắt buộc dịch sang tiếng Việt — KHÔNG được trả về chữ Trung Quốc trong kết quả.\n"
-    "- Dịch tự nhiên, súc tích. Ví dụ: '老师' → 'cô giáo', '用这个' → 'dùng cái này'.\n"
-    "- Giữ '...' hoặc '!' cuối câu. Bản dịch phải ngắn gọn để khớp bong bóng thoại.\n"
+    "STEP 2: TRANSLATE TO VIETNAMESE\n"
+    "- Must translate into Vietnamese — DO NOT return Chinese characters in the result.\n"
+    "- Translate naturally and concisely into Vietnamese. For example, Chinese '老师' should become a natural Vietnamese equivalent meaning 'teacher', and '用这个' should become a natural Vietnamese equivalent meaning 'use this'.\n"
+    "- Keep '...' or '!' at the end. The translation must be short enough to fit the speech bubble.\n"
     "\n"
-    "BƯỚC 3: TRẢ VỀ JSON (bắt buộc, không giải thích thêm)\n"
-    "{\"translations\": [{\"box_id\": 1, \"vietnamese_text\": \"<tiếng Việt>\"}]}\n"
-    "box_id khớp với số thứ tự 1-based của bong bóng trong danh sách đầu vào.\n"
-    "CẢNH BÁO: Nếu vietnamese_text chứa chữ Hán, kết quả sẽ bị từ chối."
+    "STEP 3: RETURN JSON (mandatory, no extra explanation)\n"
+    "{\"translations\": [{\"box_id\": 1, \"vietnamese_text\": \"<Vietnamese>\"}]}\n"
+    "box_id matches the 1-based order of the bubbles in the input list.\n"
+    "WARNING: If vietnamese_text contains Chinese characters, the result will be rejected."
 )
 
 
@@ -427,26 +427,26 @@ def translate_text_blocks(lines: List[str], glossary: Optional[Dict[str, str]] =
 # ──────────────────────────────────────────────────────────────────────────────
 
 ASK_SYSTEM_PROMPT = (
-    "Bạn là trợ lý phân tích bài trắc nghiệm / khảo sát.\n"
-    "Nhìn vào hình ảnh và danh sách text blocks được đánh số 1-based.\n"
-    "Một ảnh có thể chứa NHIỀU CÂU HỎI. Phân tích TẤT CẢ các câu hỏi có trong ảnh.\n"
-    "Mỗi câu hỏi có thể có NHIỀU ĐÁP ÁN ĐÚNG (ví dụ: câu hỏi 'chọn tất cả đáp án đúng').\n\n"
-    "Trả về JSON (không thêm gì khác ngoài JSON):\n"
+    "You are an assistant for analyzing quiz/test problems.\n"
+    "Look at the image and the numbered text blocks.\n"
+    "One image may contain MULTIPLE QUESTIONS. Analyze ALL questions in the image.\n"
+    "Each question may have MULTIPLE CORRECT ANSWERS (e.g. select all correct answers).\n\n"
+    "Return JSON only (nothing else):\n"
     "{\n"
     "  \"questions\": [\n"
     "    {\n"
-    "      \"question_text\": \"nội dung câu hỏi (copy nguyên văn)\",\n"
+    "      \"question_text\": \"question content (copy verbatim)\",\n"
     "      \"question_box_ids\": [1],\n"
-    "      \"answer_texts\": [\"đáp án đúng 1\", \"đáp án đúng 2\"],\n"
+    "      \"answer_texts\": [\"correct answer 1\", \"correct answer 2\"],\n"
     "      \"answer_box_ids\": [3, 5],\n"
-    "      \"explanation\": \"giải thích ngắn tại sao đáp án này đúng\"\n"
+    "      \"explanation\": \"short explanation why this answer is correct\"\n"
     "    }\n"
     "  ]\n"
     "}\n"
-    "Quy tắc:\n"
-    "- Nếu chỉ 1 câu hỏi, vẫn trả về mảng questions có 1 phần tử.\n"
-    "- answer_box_ids và answer_texts phải là mảng (dù chỉ 1 đáp án).\n"
-    "- Nếu câu hỏi yêu cầu chọn nhiều, liệt kê hết tất cả đáp án đúng."
+    "Rules:\n"
+    "- If there is only 1 question, still return questions as an array with one element.\n"
+    "- answer_box_ids and answer_texts must be arrays (even if there is only 1 correct answer).\n"
+    "- If a question requires multiple selections, list all correct answers."
 )
 
 
@@ -512,21 +512,21 @@ def ask_question(
     parts: List[str] = []
 
     if qa_context:
-        parts.append("Tham khảo các câu hỏi tương tự trong cơ sở dữ liệu kiến thức:")
+        parts.append("Refer to similar questions in the knowledge base:")
         for qa in qa_context:
             parts.append(f"  Q: {qa.get('question', '')}")
             parts.append(f"  A: {qa.get('answer', '')}")
             if qa.get("explanation"):
-                parts.append(f"  Lý do: {qa['explanation']}")
+                parts.append(f"  Reason: {qa['explanation']}")
         parts.append("")
 
-    parts.append(f"Có {len(text_blocks)} text blocks nhận diện được trong ảnh (đánh số 1-based):")
+    parts.append(f"There are {len(text_blocks)} text blocks detected in the image (numbered 1-based):")
     for idx, block in enumerate(text_blocks, 1):
         parts.append(f"  {idx}. \"{block['text']}\"")
 
     parts.append(
-        "\nDựa vào hình ảnh và danh sách trên, xác định câu hỏi và đáp án ĐÚNG NHẤT. "
-        "Trả về JSON theo format đã mô tả trong system prompt."
+        "\nBased on the image and the list above, determine the MOST CORRECT question and answer. "
+        "Return JSON in the format described in the system prompt."
     )
     user_prompt = "\n".join(parts)
 
@@ -620,12 +620,12 @@ def ask_question(
 # ──────────────────────────────────────────────────────────────────────────────
 
 CHAT_SYSTEM_PROMPT = (
-    "Bạn là trợ lý thông minh hỗ trợ người dùng học tập và hỏi đáp.\n"
-    "Khi nhận được ảnh chứa câu hỏi trắc nghiệm, hãy:\n"
-    "1. Đọc kỹ câu hỏi và tất cả các đáp án.\n"
-    "2. Xác định đáp án ĐÚNG và giải thích ngắn gọn lý do.\n"
-    "3. Trả lời bằng tiếng Việt, rõ ràng, súc tích.\n"
-    "Không cần suy luận dài dòng — trả lời thẳng vào vấn đề.\n"
+    "You are an intelligent assistant helping the user with study and question answering.\n"
+    "When you receive an image containing multiple-choice questions, do the following:\n"
+    "1. Read the question and all answer choices carefully.\n"
+    "2. Identify the CORRECT answer and explain briefly why.\n"
+    "3. Answer in Vietnamese clearly and concisely.\n"
+    "No long-winded reasoning needed — answer directly.\n"
 )
 
 
@@ -641,7 +641,7 @@ def chat_with_model(
     if context:
         messages.append({
             "role": "system",
-            "content": f"Ngữ cảnh câu hỏi gần nhất:\n{context}",
+            "content": f"Most recent question context:\n{context}",
         })
 
     for turn in (history or [])[-8:]:
@@ -657,7 +657,7 @@ def chat_with_model(
             img_url = img if img.startswith("data:") else f"data:image/png;base64,{img}"
             content_parts.append({"type": "image_url", "image_url": {"url": img_url}})
         # Always include a text instruction; fall back to default when message is empty
-        content_parts.append({"type": "text", "text": message or "Hãy đọc ảnh và trả lời câu hỏi trong ảnh. Xác định đáp án đúng và giải thích ngắn gọn bằng tiếng Việt."})
+        content_parts.append({"type": "text", "text": message or "Please read the image and answer the question in the image. Identify the correct answer and explain briefly in Vietnamese."})
         messages.append({"role": "user", "content": content_parts})
     else:
         messages.append({"role": "user", "content": message})
@@ -710,7 +710,7 @@ def chat_with_model_stream(
     if context:
         messages.append({
             "role": "system",
-            "content": f"Ngữ cảnh câu hỏi gần nhất:\n{context}",
+            "content": f"Most recent question context:\n{context}",
         })
 
     for turn in (history or [])[-8:]:
@@ -725,7 +725,7 @@ def chat_with_model_stream(
         for img in images:
             img_url = img if img.startswith("data:") else f"data:image/png;base64,{img}"
             content_parts.append({"type": "image_url", "image_url": {"url": img_url}})
-        content_parts.append({"type": "text", "text": message or "Hãy đọc ảnh và trả lời câu hỏi trong ảnh. Xác định đáp án đúng và giải thích ngắn gọn bằng tiếng Việt."})
+        content_parts.append({"type": "text", "text": message or "Please read the image and answer the question in the image. Identify the correct answer and explain briefly in Vietnamese."})
         messages.append({"role": "user", "content": content_parts})
     else:
         messages.append({"role": "user", "content": message})

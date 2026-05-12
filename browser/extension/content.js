@@ -1271,7 +1271,7 @@ async function visionDetectAndTranslate(dataUrl, rect, cropScale) {
     "Find every Chinese (包括繁體) and English text block in the image.",
     "For each text block return its position as fractions of image size (0.0–1.0) and its Vietnamese translation.",
     "Return ONLY a valid JSON array — no other text:",
-    '[{"x":0.05,"y":0.10,"w":0.90,"h":0.08,"vi":"Bản dịch tiếng Việt ở đây"}]',
+    '[{"x":0.05,"y":0.10,"w":0.90,"h":0.08,"vi":"Vietnamese translation here"}]',
     "If no Chinese or English text is found, return: []",
   ].join("\n");
 

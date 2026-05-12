@@ -164,7 +164,7 @@ function createUI() {
       <div class="menu-tab-pane active" id="tab-control">
         <div class="mode-toggle">
           <button class="mode-btn" id="btn-mode-translate">&#128260; Dịch</button>
-          <button class="mode-btn" id="btn-mode-ask">&#10067; Hỏi đáp</button>
+          <button class="mode-btn" id="btn-mode-ask">&#10067; Ask</button>
         </div>
         <button id="btn-start">Start Scan</button>
         <button id="btn-fullpage">Scan Full Page</button>
@@ -179,15 +179,15 @@ function createUI() {
       </div>
       <div class="menu-tab-pane" id="tab-chat">
         <div class="chat-header">
-          <span class="chat-header-title">Lịch sử</span>
-          <button class="chat-clear-btn" id="chat-clear" title="Xóa toàn bộ lịch sử chat">&#128465; Xóa</button>
+          <span class="chat-header-title">History</span>
+          <button class="chat-clear-btn" id="chat-clear" title="Clear all chat history">&#128465; Clear</button>
         </div>
         <div class="chat-area" id="chat-area"></div>
         <div class="chat-attach-bar" id="chat-attach-bar"></div>
         <div class="chat-input-row">
           <input type="file" id="chat-file-input" accept="image/*" multiple style="display:none">
-          <button class="chat-attach-btn" id="chat-attach" title="Đính kèm ảnh (hoặc Ctrl+V để paste)">&#128206;</button>
-          <input class="chat-input" id="chat-input" type="text" placeholder="Nhập hoặc paste ảnh, Enter để gửi…">
+          <button class="chat-attach-btn" id="chat-attach" title="Attach image (or Ctrl+V to paste)">&#128206;</button>
+          <input class="chat-input" id="chat-input" type="text" placeholder="Type or paste image, Enter to send…">
         </div>
       </div>
     </div>
@@ -400,7 +400,7 @@ function setAppMode(mode) {
   localStorage.setItem("appMode", mode);
   updateModeUI();
   clearAnnotations();
-  setStatus("Chế độ: " + (mode === "ask" ? "Hỏi đáp" : "Dịch"));
+  setStatus("Mode: " + (mode === "ask" ? "Ask" : "Translate"));
 }
 
 let activeTab = "control";
@@ -432,14 +432,14 @@ function updateModeUI() {
 
 async function onQAClicked() {
   const choice = window.prompt(
-    "Q&A Database:\n1 - Thêm câu hỏi mới\n2 - Xem số lượng\n3 - Xóa theo ID\n\nNhập số tùy chọn:", "1"
+    "Q&A Database:\n1 - Add new question\n2 - View count\n3 - Delete by ID\n\nEnter option number:", "1"
   );
   if (!choice) return;
   const t = choice.trim();
   if (t === "1") {
-    const question = window.prompt("Nhập câu hỏi:"); if (!question) return;
-    const answer   = window.prompt("Nhập đáp án đúng:"); if (!answer) return;
-    const explanation = window.prompt("Giải thích (tùy chọn):", "") || "";
+    const question = window.prompt("Enter question:"); if (!question) return;
+    const answer   = window.prompt("Enter correct answer:"); if (!answer) return;
+    const explanation = window.prompt("Explanation (optional):", "") || "";
     try {
       const resp = await fetch(SERVER_URL + "/api/qa", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -447,24 +447,24 @@ async function onQAClicked() {
       });
       if (!resp.ok) throw new Error("HTTP " + resp.status);
       const data = await resp.json();
-      setStatus("Đã thêm Q&A #" + data.qa.id);
-    } catch (err) { setStatus("Lỗi thêm Q&A: " + err.message, true); }
+      setStatus("Added Q&A #" + data.qa.id);
+    } catch (err) { setStatus("Q&A add error: " + err.message, true); }
   } else if (t === "2") {
     try {
       const resp = await fetch(SERVER_URL + "/api/qa");
       const data = await resp.json();
       const count = (data.qa || []).length;
-      window.alert("Q&A Database: " + count + " câu hỏi đã lưu.");
+      window.alert("Q&A Database: " + count + " saved questions.");
       setStatus("Q&A database: " + count + " entries.");
-    } catch (err) { setStatus("Lỗi tải Q&A: " + err.message, true); }
+    } catch (err) { setStatus("Q&A load error: " + err.message, true); }
   } else if (t === "3") {
-    const idStr = window.prompt("Nhập ID cần xóa:"); if (!idStr) return;
+    const idStr = window.prompt("Enter the ID to delete:"); if (!idStr) return;
     const id = parseInt(idStr, 10);
-    if (isNaN(id)) { setStatus("ID không hợp lệ.", true); return; }
+    if (isNaN(id)) { setStatus("Invalid ID.", true); return; }
     try {
       const resp = await fetch(SERVER_URL + "/api/qa/" + id, { method: "DELETE" });
       if (!resp.ok) throw new Error("HTTP " + resp.status);
-      setStatus("Đã xóa Q&A #" + id + ".");
+      setStatus("Deleted Q&A #" + id + ".");
     } catch (err) { setStatus("Lỗi xóa Q&A: " + err.message, true); }
   }
 }

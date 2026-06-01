@@ -32,19 +32,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
-  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    if (!tabs || !tabs[0] || typeof tabs[0].windowId !== "number") {
-      sendResponse({ error: "No active tab found." });
+  // Use the sender tab's windowId so DevTools focus doesn't break capture
+  const windowId = sender && sender.tab && typeof sender.tab.windowId === "number"
+    ? sender.tab.windowId
+    : null;
+  const tabId = sender && sender.tab && sender.tab.id ? sender.tab.id : null;
+
+  chrome.tabs.captureVisibleTab(windowId, { format: "png" }, (dataUrl) => {
+    if (chrome.runtime.lastError || !dataUrl) {
+      sendResponse({ error: chrome.runtime.lastError?.message || "Failed to capture tab.", tabId });
       return;
     }
-
-    chrome.tabs.captureVisibleTab(null, { format: "png" }, (dataUrl) => {
-      if (chrome.runtime.lastError || !dataUrl) {
-        sendResponse({ error: chrome.runtime.lastError?.message || "Failed to capture tab." });
-        return;
-      }
-      sendResponse({ dataUrl, tabId: tabs[0].id });
-    });
+    sendResponse({ dataUrl, tabId });
   });
 
   return true;

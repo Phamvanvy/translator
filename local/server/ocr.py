@@ -1,5 +1,4 @@
 import base64
-import inspect
 import io
 import os
 from typing import Dict, List
@@ -25,20 +24,28 @@ import cv2
 import numpy as np
 from PIL import Image
 
-try:
-    from paddleocr import PaddleOCR
-except ImportError as exc:
-    raise ImportError(
-        "PaddleOCR requires paddlepaddle. Install it with `pip install paddlepaddle` "
-        "or see README.md for environment instructions."
-    ) from exc
+# PaddleOCR is imported lazily inside get_ocr_model() so that starting the server
+# does not trigger model downloads/initialization unless translate mode is actually used.
 
 OCR_LANG_DEFAULT = os.getenv("PADDLE_OCR_LANG", "japan")
-_ocr_models: Dict[str, PaddleOCR] = {}
+_ocr_models: Dict = {}
+
+
+def _get_paddleocr_class():
+    try:
+        from paddleocr import PaddleOCR  # noqa: PLC0415
+        return PaddleOCR
+    except ImportError as exc:
+        raise ImportError(
+            "PaddleOCR requires paddlepaddle. Install it with `pip install paddlepaddle` "
+            "or see README.md for environment instructions."
+        ) from exc
 
 
 def build_paddleocr_kwargs(**kwargs) -> Dict[str, object]:
-    signature = inspect.signature(PaddleOCR.__init__)
+    import inspect as _inspect
+    PaddleOCR = _get_paddleocr_class()
+    signature = _inspect.signature(PaddleOCR.__init__)
     supported = {
         name: value
         for name, value in kwargs.items()
@@ -52,9 +59,10 @@ def build_paddleocr_kwargs(**kwargs) -> Dict[str, object]:
     return supported
 
 
-def get_ocr_model(lang: str = OCR_LANG_DEFAULT) -> PaddleOCR:
+def get_ocr_model(lang: str = OCR_LANG_DEFAULT):
     lang = lang or OCR_LANG_DEFAULT
     if lang not in _ocr_models:
+        PaddleOCR = _get_paddleocr_class()
         model_kwargs = build_paddleocr_kwargs(use_angle_cls=True, lang=lang, use_gpu=False)
         _ocr_models[lang] = PaddleOCR(**model_kwargs)
     return _ocr_models[lang]

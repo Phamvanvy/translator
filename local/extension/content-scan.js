@@ -49,16 +49,28 @@ function hasFrameChanged(prev, next) {
 
 async function startScan() {
   if (scanMode) return;
-  lastPrefetchData = null;
-  scanBuffer.length = 0;
-  lastCaptureTimestamp = 0;
   scanMode = true;
-  setStatus("Scanning now...");
+  setStatus("Capturing...");
   updateButtons();
+  const rect = selectedRect || getViewportRect();
   try {
-    await scanOnce();
+    const dataUrl = await new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ action: "captureVisibleTab" }, async response => {
+        if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+        if (!response || response.error) return reject(new Error(response?.error || "capture failed"));
+        try { resolve(await cropDataUrl(response.dataUrl, rect)); }
+        catch (e) { reject(e); }
+      });
+    });
+    attachedChatImages.push(dataUrl);
+    updateAttachBar();
+    switchTab("chat");
+    setStatus("📎 Image attached. Review then press Send.");
+  } catch (err) {
+    setStatus(`Capture error: ${err.message}`, true);
   } finally {
-    if (scanMode) { scanMode = false; updateButtons(); }
+    scanMode = false;
+    updateButtons();
   }
 }
 
@@ -585,14 +597,14 @@ async function runAgentLoop(task) {
       if (agentAction.action === "scroll_down") {
         appendChatMessage("bot", `<em>⬇️ Scroll down${reason}</em>`);
         window.scrollBy({ top: Math.round(cap.h * 0.8), behavior: "smooth" });
-        await new Promise(r => setTimeout(r, 900));
+        await new Promise(r => setTimeout(r, 400));
         continue;
       }
 
       if (agentAction.action === "scroll_up") {
         appendChatMessage("bot", `<em>⬆️ Scroll up${reason}</em>`);
         window.scrollBy({ top: -Math.round(cap.h * 0.8), behavior: "smooth" });
-        await new Promise(r => setTimeout(r, 900));
+        await new Promise(r => setTimeout(r, 400));
         continue;
       }
 
@@ -600,14 +612,14 @@ async function runAgentLoop(task) {
         const x = agentAction.x, y = agentAction.y;
         appendChatMessage("bot", `<em>🖱 Click (${x}, ${y})${reason}</em>`);
         showAutoClickFlash(x, y);
-        await new Promise(r => setTimeout(r, 220));
+        await new Promise(r => setTimeout(r, 80));
         const target = document.elementFromPoint(x, y);
         if (target && target !== document.documentElement && target !== document.body) {
           target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, clientX: x, clientY: y }));
           target.dispatchEvent(new MouseEvent("mouseup",   { bubbles: true, cancelable: true, clientX: x, clientY: y }));
           target.dispatchEvent(new MouseEvent("click",     { bubbles: true, cancelable: true, clientX: x, clientY: y }));
         }
-        await new Promise(r => setTimeout(r, 1400));
+        await new Promise(r => setTimeout(r, 500));
         continue;
       }
 
@@ -619,7 +631,7 @@ async function runAgentLoop(task) {
         if (target) {
           target.focus();
           target.click();
-          await new Promise(r => setTimeout(r, 80));
+          await new Promise(r => setTimeout(r, 50));
           // Native input setter for React/Vue compatibility
           const nativeInputSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
           if (nativeInputSetter && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) {
@@ -631,7 +643,7 @@ async function runAgentLoop(task) {
             document.execCommand('insertText', false, text);
           }
         }
-        await new Promise(r => setTimeout(r, 600));
+        await new Promise(r => setTimeout(r, 300));
         continue;
       }
 
@@ -644,7 +656,7 @@ async function runAgentLoop(task) {
         if (key === "Enter") {
           activeEl.dispatchEvent(new KeyboardEvent("keypress", { key, bubbles: true }));
         }
-        await new Promise(r => setTimeout(r, 1000));
+        await new Promise(r => setTimeout(r, 400));
         continue;
       }
 
@@ -669,66 +681,6 @@ async function scanFullPage() {
   updateButtons();
   switchTab("chat");
 
-  // ── Ask mode: process each viewport section one-by-one ───────────────────
-  if (appMode === "ask") {
-    try {
-      window.scrollTo({ top: 0, behavior: "instant" });
-      await new Promise(r => setTimeout(r, 600));
-      const viewportH = window.innerHeight;
-      const viewportW = window.innerWidth;
-      const totalPageH = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
-      const maxScrollY = Math.max(0, totalPageH - viewportH);
-      const step = viewportH;
-      const scrollTargets = [0];
-      if (maxScrollY > 0) {
-        for (let pos = step; pos < maxScrollY; pos += step) scrollTargets.push(pos);
-        if (scrollTargets[scrollTargets.length - 1] < maxScrollY) scrollTargets.push(maxScrollY);
-      }
-      appendChatMessage("bot", `<em>🔍 Ask mode: scanning ${scrollTargets.length} section(s)...</em>`);
-      let lastScrollY = -1;
-      let lastSectionHash = null;
-      for (let i = 0; i < scrollTargets.length && scanMode; i++) {
-        window.scrollTo({ top: scrollTargets[i], behavior: "instant" });
-        await new Promise(r => setTimeout(r, 500));
-        const currentScrollY = window.scrollY || document.documentElement.scrollTop || 0;
-        if (i > 0 && currentScrollY === lastScrollY) {
-          setStatus("Page didn't scroll further, stopping.");
-          break;
-        }
-        lastScrollY = currentScrollY;
-        setStatus(`Asking section ${i + 1}/${scrollTargets.length}...`);
-        const dataUrl = await new Promise(resolve => {
-          chrome.runtime.sendMessage({ action: "captureVisibleTab" }, async response => {
-            if (!chrome.runtime.lastError && response && !response.error) {
-              try {
-                const rect = { left: 0, top: 0, width: viewportW, height: viewportH };
-                resolve(await cropDataUrl(response.dataUrl, rect));
-              } catch (e) { resolve(null); }
-            } else { resolve(null); }
-          });
-        });
-        if (!dataUrl) continue;
-        try {
-          const imageData = await getImageDataFromDataUrl(dataUrl);
-          const hash = hashImageData(imageData);
-          if (lastSectionHash && hash === lastSectionHash) { setStatus("Duplicate section, stopping."); break; }
-          lastSectionHash = hash;
-        } catch (_) {}
-        const viewRect = { left: 0, top: 0, width: viewportW, height: viewportH };
-        await sendToServerAsk(dataUrl, viewRect);
-        // Wait for page to react to click (auto-advance, animations, etc.)
-        if (autoClickAnswer) await new Promise(r => setTimeout(r, 1800));
-      }
-      setStatus(`✅ Full page Ask complete.`);
-    } finally {
-      window.scrollTo({ top: originalScrollY, behavior: "smooth" });
-      scanMode = false;
-      updateButtons();
-    }
-    return;
-  }
-
-  // ── Translate mode: collect all sections then attach ─────────────────────
   try {
     window.scrollTo({ top: 0, behavior: "instant" });
     await new Promise(r => setTimeout(r, 600));
@@ -736,29 +688,24 @@ async function scanFullPage() {
     const viewportW = window.innerWidth;
     const totalPageH = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
     const maxScrollY = Math.max(0, totalPageH - viewportH);
-    const step = viewportH; // full steps, no overlap
+    const step = viewportH;
     const scrollTargets = [0];
     if (maxScrollY > 0) {
       for (let pos = step; pos < maxScrollY; pos += step) scrollTargets.push(pos);
       if (scrollTargets[scrollTargets.length - 1] < maxScrollY) scrollTargets.push(maxScrollY);
     }
 
-    appendChatMessage("bot", `<em>📸 Capturing full page (${scrollTargets.length} sections)...</em>`);
-
-    const sectionDataUrls = [];
+    appendChatMessage("bot", `<em>📸 Capturing ${scrollTargets.length} section(s)...</em>`);
+    let lastScrollY = -1;
     let lastSectionHash = null;
-    let lastScrollY = 0;
+    let captured = 0;
+
     for (let i = 0; i < scrollTargets.length && scanMode; i++) {
-      if (i > 0) {
-        window.scrollTo({ top: scrollTargets[i], behavior: "instant" });
-        await new Promise(r => setTimeout(r, 500));
-        const currentScrollY = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
-        if (currentScrollY === lastScrollY) {
-          setStatus("Scrolling did not change viewport, stopping capture.");
-          break;
-        }
-        lastScrollY = currentScrollY;
-      }
+      window.scrollTo({ top: scrollTargets[i], behavior: "instant" });
+      await new Promise(r => setTimeout(r, 500));
+      const currentScrollY = window.scrollY || document.documentElement.scrollTop || 0;
+      if (i > 0 && currentScrollY === lastScrollY) { setStatus("Page didn't scroll further, stopping."); break; }
+      lastScrollY = currentScrollY;
       setStatus(`Capturing section ${i + 1}/${scrollTargets.length}...`);
 
       const dataUrl = await new Promise(resolve => {
@@ -768,36 +715,24 @@ async function scanFullPage() {
               const rect = { left: 0, top: 0, width: viewportW, height: viewportH };
               resolve(await cropDataUrl(response.dataUrl, rect));
             } catch (e) { resolve(null); }
-          } else {
-            resolve(null);
-          }
+          } else { resolve(null); }
         });
       });
-      if (!dataUrl) continue;
+      if (!dataUrl) { console.warn("[scan] captureVisibleTab returned null for section", i); continue; }
 
       try {
         const imageData = await getImageDataFromDataUrl(dataUrl);
         const hash = hashImageData(imageData);
-        if (lastSectionHash && hash === lastSectionHash) {
-          setStatus("Duplicate section detected, stopping capture.");
-          break;
-        }
+        if (lastSectionHash && hash === lastSectionHash) { setStatus("Duplicate section, stopping."); break; }
         lastSectionHash = hash;
-        sectionDataUrls.push(dataUrl);
-      } catch (err) {
-        sectionDataUrls.push(dataUrl);
-      }
+      } catch (_) {}
+
+      attachedChatImages.push(dataUrl);
+      captured++;
     }
 
-    if (sectionDataUrls.length === 0) {
-      setStatus("Unable to capture image.", true);
-      return;
-    }
-
-    attachedChatImages = sectionDataUrls;
     updateAttachBar();
-    setStatus(`✅ Captured ${sectionDataUrls.length} sections.`);
-    appendChatMessage("bot", `<em>✅ Captured ${sectionDataUrls.length} sections. Enter your question below.</em>`);
+    setStatus(`📎 ${captured} section(s) attached. Review then press Send.`);
   } finally {
     window.scrollTo({ top: originalScrollY, behavior: "smooth" });
     scanMode = false;

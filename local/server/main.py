@@ -13,8 +13,8 @@ from typing import Dict, List, Optional
 
 from glossary_store import get_glossary, update_glossary
 from ocr import decode_image, merge_text_lines, ocr_image, inpaint_text_regions
-from qa_store import add_qa_entry, find_relevant_qa, get_all_qa, remove_qa_entry
-from translate import agent_step, ask_question, chat_with_model, chat_with_model_stream, translate_text_blocks, translate_with_vision
+from qa_store import add_qa_entry, get_all_qa, remove_qa_entry
+from translate import agent_step, ask_question, ask_question_vision, chat_with_model, chat_with_model_stream, translate_text_blocks, translate_with_vision
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("translator_server")
@@ -201,21 +201,15 @@ def api_translate_image(request: ImageTranslateRequest):
 
 @app.post("/api/ask")
 def api_ask(request: AskRequest):
-    """Scan an image containing a quiz/survey question and return the correct answer."""
+    """Scan an image containing a quiz/survey question and return the correct answer.
+
+    Uses vision-only mode: the LLM reads the image directly without OCR,
+    so PaddleOCR models are not loaded at all for this endpoint.
+    """
     try:
-        image = decode_image(request.image)
-        lines = ocr_image(image, lang=request.lang)
-        merged = merge_text_lines(lines)
-
-        text_blocks = [{"box": item["box"], "text": item["text"]} for item in merged]
-
-        all_text = " ".join(b["text"] for b in text_blocks)
-        qa_context = find_relevant_qa(all_text, top_k=5) if text_blocks else []
-
-        result = ask_question(
+        result = ask_question_vision(
             request.image,
-            text_blocks,
-            qa_context,
+            qa_context=None,
             llm_url=request.llm_url,
             llm_model=request.llm_model,
         )

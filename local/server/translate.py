@@ -105,14 +105,17 @@ def extract_content_from_response(data: dict, endpoint: str) -> str:
         raise ValueError(f"Empty response from {endpoint}")
     if "choices" in data and data["choices"]:
         choice = data["choices"][0]
-        return choice.get("message", {}).get("content") or choice.get("text") or ""
-    if "output_text" in data:
-        return data["output_text"]
-    if "response" in data:
-        return data["response"]
-    if "text" in data and isinstance(data["text"], str):
-        return data["text"]
-    raise ValueError(f"Unexpected LMStudio/Qwen response format from {endpoint}: {data}")
+        raw = choice.get("message", {}).get("content") or choice.get("text") or ""
+    elif "output_text" in data:
+        raw = data["output_text"]
+    elif "response" in data:
+        raw = data["response"]
+    elif "text" in data and isinstance(data["text"], str):
+        raw = data["text"]
+    else:
+        raise ValueError(f"Unexpected LMStudio/Qwen response format from {endpoint}: {data}")
+    # Strip Qwen3 / DeepSeek thinking tokens <think>...</think>
+    return re.sub(r"<think>.*?</think>", "", raw, flags=re.S).strip()
 
 
 def _try_parse_json_relaxed(text: str):
@@ -269,7 +272,7 @@ def translate_with_vision(
         llm_url, llm_model = _resolve_llm_settings(llm_url, llm_model)
         user_prompt = _build_vision_user_prompt(texts, glossary, character_names)
         img_url = image_data if image_data.startswith("data:") else f"data:image/png;base64,{image_data}"
-        max_tokens = max(2048, len(texts) * 200)
+        max_tokens = max(32768, len(texts) * 200)
 
         vision_payload = {
             "model": llm_model,
@@ -352,7 +355,7 @@ def translate_text_blocks(
                 llm_model,
             )
 
-        max_tokens = max(2048, len(missing_lines) * 200)
+        max_tokens = max(32768, len(missing_lines) * 200)
         chat_payload = {
             "model": llm_model,
             "messages": [
@@ -446,6 +449,110 @@ def translate_text_blocks(
 # Ask / Quiz mode
 # ──────────────────────────────────────────────────────────────────────────────
 
+ASK_VISION_SYSTEM_PROMPT = (
+    "You are a quiz/test solver. Look at the image carefully.\n"
+    "Identify ALL questions visible in the image and their CORRECT answers.\n"
+    "For each correct answer option, provide its bounding box in image pixels.\n\n"
+    "Return ONLY valid JSON (nothing else):\n"
+    "{\n"
+    "  \"questions\": [\n"
+    "    {\n"
+    "      \"question_text\": \"question content\",\n"
+    "      \"answer_texts\": [\"correct answer 1\"],\n"
+    "      \"answer_boxes\": [[left, top, right, bottom]],\n"
+    "      \"explanation\": \"why this is correct\"\n"
+    "    }\n"
+    "  ]\n"
+    "}\n"
+    "Rules:\n"
+    "- answer_boxes[i] is the bounding box of answer_texts[i] in image pixels (0,0 = top-left)\n"
+    "- Include ALL correct answers for multi-select questions\n"
+    "- Return questions as an array even if there is only 1 question\n"
+    "- answer_texts and answer_boxes must always be arrays of equal length"
+)
+
+
+def ask_question_vision(
+    image_data: str,
+    qa_context: Optional[List[dict]] = None,
+    llm_url: Optional[str] = None,
+    llm_model: Optional[str] = None,
+) -> dict:
+    """Vision-only ask: sends the image directly to the LLM, no OCR required.
+
+    The LLM reads the text from the image itself and returns the correct
+    answers along with their pixel bounding boxes for auto-click.
+    """
+    img_url = image_data if image_data.startswith("data:") else f"data:image/png;base64,{image_data}"
+    llm_url, llm_model = _resolve_llm_settings(llm_url, llm_model)
+
+    parts: List[str] = []
+    if qa_context:
+        parts.append("Refer to similar questions in the knowledge base:")
+        for qa in qa_context:
+            parts.append(f"  Q: {qa.get('question', '')}")
+            parts.append(f"  A: {qa.get('answer', '')}")
+            if qa.get("explanation"):
+                parts.append(f"  Reason: {qa['explanation']}")
+        parts.append("")
+    parts.append("Look at the image and return the correct answer(s) with bounding box coordinates. /nothink")
+    user_prompt = "\n".join(parts)
+
+    payload = {
+        "model": llm_model,
+        "messages": [
+            {"role": "system", "content": ASK_VISION_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": img_url}},
+                    {"type": "text", "text": user_prompt},
+                ],
+            },
+        ],
+        "temperature": 0.1,
+        "max_tokens": 32768,
+        "top_p": 0.9,
+    }
+
+    endpoint = f"{llm_url}/v1/chat/completions"
+    try:
+        response = requests.post(endpoint, json=payload, timeout=(10, LMSTUDIO_TIMEOUT))
+        if response.status_code == 200:
+            data = response.json()
+            content = extract_content_from_response(data, endpoint)
+            logger.info("ask_question_vision raw content (%d chars): %s", len(content), content[:300])
+            parsed = _parse_ask_json(content)
+            if parsed.get("questions"):
+                logger.info("ask_question_vision: %d question(s) parsed.", len(parsed["questions"]))
+            else:
+                logger.warning("ask_question_vision: LLM response missing questions.")
+        else:
+            logger.warning("ask_question_vision: HTTP %s from LLM.", response.status_code)
+    except Exception as exc:
+        logger.warning("ask_question_vision failed: %s", exc)
+
+    # Build results list for auto-click (one entry per answer box)
+    results = []
+    for q_idx, q in enumerate(parsed.get("questions", [])):
+        answer_texts = q.get("answer_texts", [])
+        answer_boxes = q.get("answer_boxes", [])
+        for i, text in enumerate(answer_texts):
+            box = answer_boxes[i] if i < len(answer_boxes) else None
+            if box and len(box) == 4:
+                results.append({
+                    "box": [int(v) for v in box],
+                    "text": text,
+                    "is_answer": True,
+                    "question_indices": [q_idx],
+                })
+
+    return {
+        "questions": parsed.get("questions", []),
+        "results": results,
+    }
+
+
 ASK_SYSTEM_PROMPT = (
     "You are an assistant for analyzing quiz/test problems.\n"
     "Look at the image and the numbered text blocks.\n"
@@ -473,6 +580,9 @@ ASK_SYSTEM_PROMPT = (
 def _parse_ask_json(text: str) -> dict:
     """Parse LLM ask response. Returns dict with 'questions' list."""
     trimmed = text.strip()
+    # Strip thinking tokens (Qwen3, DeepSeek-R1, etc.)
+    trimmed = re.sub(r"<think>.*?</think>", "", trimmed, flags=re.S).strip()
+    # Strip markdown code fences
     trimmed = re.sub(r"^```[a-zA-Z]*\s*", "", trimmed)
     trimmed = re.sub(r"\s*```$", "", trimmed).strip()
 
@@ -568,7 +678,7 @@ def ask_question(
             },
         ],
         "temperature": 0.1,
-        "max_tokens": 512,
+        "max_tokens": 32768,
         "top_p": 0.9,
     }
 
@@ -580,7 +690,7 @@ def ask_question(
             {"role": "user", "content": user_prompt},
         ],
         "temperature": 0.1,
-        "max_tokens": 512,
+        "max_tokens": 32768,
         "top_p": 0.9,
     }
 
@@ -711,21 +821,22 @@ def agent_step(
     if mode == "plan":
         text_parts.append("\nOutput your execution plan as JSON.")
     else:
+        if step_history:
+            text_parts.append("\nPrevious steps taken:")
+            for i, entry in enumerate(step_history[-5:], 1):
+                text_parts.append(f"  {i}. {json.dumps(entry, ensure_ascii=False)}")
         text_parts.append("\nDecide the single best next action. Return only JSON.")
     user_text = "\n".join(text_parts)
 
     user_parts = [
         {"type": "image_url", "image_url": {"url": img_url}},
-        {"type": "text", "text": user_text},
+        {"type": "text", "text": user_text + "\n/nothink"},
     ]
 
     messages: List[dict] = [{"role": "system", "content": system_prompt}]
-    if mode == "act" and step_history:
-        for entry in step_history[-5:]:
-            messages.append({"role": "assistant", "content": json.dumps(entry, ensure_ascii=False)})
     messages.append({"role": "user", "content": user_parts})
 
-    max_tokens = 400 if mode == "plan" else 250
+    max_tokens = 32768
 
     payload = {
         "model": llm_model,
@@ -737,11 +848,18 @@ def agent_step(
 
     endpoint = f"{llm_url}/v1/chat/completions"
     try:
-        response = requests.post(endpoint, json=payload, timeout=(10, LMSTUDIO_TIMEOUT))
-        response.raise_for_status()
-        content = extract_content_from_response(response.json(), endpoint)
+        for attempt in range(2):
+            response = requests.post(endpoint, json=payload, timeout=(10, LMSTUDIO_TIMEOUT))
+            response.raise_for_status()
+            content = extract_content_from_response(response.json(), endpoint)
+            logger.info("Agent raw content attempt %d (%d chars): %s", attempt + 1, len(content), content[:300])
+            if content:
+                break
+            logger.warning("Agent got empty content on attempt %d, retrying...", attempt + 1)
         content = re.sub(r"^```[a-zA-Z]*\s*", "", content.strip())
         content = re.sub(r"\s*```$", "", content).strip()
+        # Fix LLM forgetting "y": key — pattern: "x": 123, "456" → "x": 123, "y": 456
+        content = re.sub(r'("x"\s*:\s*[\d.]+)\s*,\s*"(\d+)"', r'\1, "y": \2', content)
         m = re.search(r"\{.*\}", content, re.S)
         if m:
             content = m.group(0)
@@ -757,8 +875,12 @@ def agent_step(
         action = parsed.get("action", "done")
         result: dict = {"action": action, "reason": str(parsed.get("reason", ""))}
         if action in ("click", "type"):
-            result["x"] = int(float(parsed.get("x", 0)))
-            result["y"] = int(float(parsed.get("y", 0)))
+            def _to_int(v):
+                if isinstance(v, list):
+                    v = sum(v) / len(v) if v else 0
+                return int(float(v))
+            result["x"] = _to_int(parsed.get("x", 0))
+            result["y"] = _to_int(parsed.get("y", 0))
         if action == "type":
             result["text"] = str(parsed.get("text", ""))
         if action == "press_key":
@@ -812,17 +934,18 @@ def chat_with_model(
             img_url = img if img.startswith("data:") else f"data:image/png;base64,{img}"
             content_parts.append({"type": "image_url", "image_url": {"url": img_url}})
         # Always include a text instruction; fall back to default when message is empty
-        content_parts.append({"type": "text", "text": message or "Please read the image and answer the question in the image. Identify the correct answer and explain briefly in Vietnamese."})
+        _chat_text = (message or "Please read the image and answer the question in the image. Identify the correct answer and explain briefly in Vietnamese.") + " /nothink"
+        content_parts.append({"type": "text", "text": _chat_text})
         messages.append({"role": "user", "content": content_parts})
     else:
-        messages.append({"role": "user", "content": message})
+        messages.append({"role": "user", "content": message + " /nothink"})
 
     llm_url, llm_model = _resolve_llm_settings(llm_url, llm_model)
     payload = {
         "model": llm_model,
         "messages": messages,
         "temperature": 0.5,
-        "max_tokens": 4096,
+        "max_tokens": 32768,
         "top_p": 0.9,
     }
 
@@ -883,17 +1006,18 @@ def chat_with_model_stream(
         for img in images:
             img_url = img if img.startswith("data:") else f"data:image/png;base64,{img}"
             content_parts.append({"type": "image_url", "image_url": {"url": img_url}})
-        content_parts.append({"type": "text", "text": message or "Please read the image and answer the question in the image. Identify the correct answer and explain briefly in Vietnamese."})
+        _chat_text = (message or "Please read the image and answer the question in the image. Identify the correct answer and explain briefly in Vietnamese.") + " /nothink"
+        content_parts.append({"type": "text", "text": _chat_text})
         messages.append({"role": "user", "content": content_parts})
     else:
-        messages.append({"role": "user", "content": message})
+        messages.append({"role": "user", "content": message + " /nothink"})
 
     llm_url, llm_model = _resolve_llm_settings(llm_url, llm_model)
     payload = {
         "model": llm_model,
         "messages": messages,
         "temperature": 0.5,
-        "max_tokens": 4096,
+        "max_tokens": 32768,
         "top_p": 0.9,
         "stream": True,
     }

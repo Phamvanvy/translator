@@ -639,8 +639,138 @@ def ask_question(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Chat / follow-up question
+# Autonomous agent step
 # ──────────────────────────────────────────────────────────────────────────────
+
+AGENT_SYSTEM_PROMPT = (
+    "You are an AI agent controlling a web browser to complete tasks for the user.\n"
+    "\n"
+    "You receive:\n"
+    "1. A screenshot of the current viewport\n"
+    "2. A list of visible interactive elements (tag, text, x, y) — use these for precise coordinates\n"
+    "3. Your recent action history — do NOT repeat the same action consecutively\n"
+    "\n"
+    "Return ONLY valid JSON — no markdown, no extra text:\n"
+    '  Click:       {"action": "click",      "x": 320, "y": 450, "reason": "..."}\n'
+    '  Type text:   {"action": "type",       "x": 320, "y": 450, "text": "...", "reason": "..."}\n'
+    '  Press key:   {"action": "press_key",  "key": "Enter", "reason": "..."}\n'
+    '  Scroll down: {"action": "scroll_down","reason": "..."}\n'
+    '  Scroll up:   {"action": "scroll_up",  "reason": "..."}\n'
+    '  Done:        {"action": "done",       "reason": "..."}\n'
+    "\n"
+    "Decision rules (follow in priority order):\n"
+    "1. Prefer the element list over screenshot for locating click targets.\n"
+    "2. Unanswered question visible → click the CORRECT answer.\n"
+    "3. All answers selected and Next/Submit/Continue visible → click it.\n"
+    "4. Input field needs filling → use type action.\n"
+    "5. Need more content → scroll_down (or scroll_up if you overshot).\n"
+    "6. Task fully done or nothing actionable remains → done."
+)
+
+AGENT_PLAN_PROMPT = (
+    "You are an AI browser agent. Analyze the current page and output a concise execution plan.\n"
+    "\n"
+    "You receive a screenshot and list of visible interactive elements.\n"
+    "Return ONLY valid JSON:\n"
+    '{"plan": ["Step 1: ...", "Step 2: ..."], "reason": "Brief overview"}\n'
+    "\n"
+    "Keep it concise (max 8 steps). Only describe what you can infer from the current view."
+)
+
+
+def agent_step(
+    image_data: str,
+    viewport_width: int = 1280,
+    viewport_height: int = 720,
+    step_history: Optional[List[dict]] = None,
+    dom_context: Optional[List[dict]] = None,
+    task: str = "",
+    mode: str = "act",
+    llm_url: Optional[str] = None,
+    llm_model: Optional[str] = None,
+) -> dict:
+    """Given a screenshot of the current viewport, ask the LLM what action to take next.
+
+    mode='act'  → returns {"action": "click"|"type"|"press_key"|"scroll_down"|"scroll_up"|"done", ...}
+    mode='plan' → returns {"plan": [...], "reason": "..."}
+    """
+    llm_url, llm_model = _resolve_llm_settings(llm_url, llm_model)
+    img_url = image_data if image_data.startswith("data:") else f"data:image/png;base64,{image_data}"
+
+    system_prompt = AGENT_PLAN_PROMPT if mode == "plan" else AGENT_SYSTEM_PROMPT
+
+    # Build user text
+    text_parts: List[str] = []
+    if task:
+        text_parts.append(f"TASK: {task}\n")
+    text_parts.append(f"Viewport: {viewport_width}x{viewport_height} px")
+    if dom_context:
+        text_parts.append(f"\nVisible interactive elements ({min(len(dom_context), 50)} shown):")
+        for i, el in enumerate(dom_context[:50], 1):
+            text_parts.append(f"  {i}. [{el.get('tag','')}] \"{el.get('text','')}\" at ({el.get('x',0)}, {el.get('y',0)})")
+    if mode == "plan":
+        text_parts.append("\nOutput your execution plan as JSON.")
+    else:
+        text_parts.append("\nDecide the single best next action. Return only JSON.")
+    user_text = "\n".join(text_parts)
+
+    user_parts = [
+        {"type": "image_url", "image_url": {"url": img_url}},
+        {"type": "text", "text": user_text},
+    ]
+
+    messages: List[dict] = [{"role": "system", "content": system_prompt}]
+    if mode == "act" and step_history:
+        for entry in step_history[-5:]:
+            messages.append({"role": "assistant", "content": json.dumps(entry, ensure_ascii=False)})
+    messages.append({"role": "user", "content": user_parts})
+
+    max_tokens = 400 if mode == "plan" else 250
+
+    payload = {
+        "model": llm_model,
+        "messages": messages,
+        "temperature": 0.1,
+        "max_tokens": max_tokens,
+        "top_p": 0.9,
+    }
+
+    endpoint = f"{llm_url}/v1/chat/completions"
+    try:
+        response = requests.post(endpoint, json=payload, timeout=(10, LMSTUDIO_TIMEOUT))
+        response.raise_for_status()
+        content = extract_content_from_response(response.json(), endpoint)
+        content = re.sub(r"^```[a-zA-Z]*\s*", "", content.strip())
+        content = re.sub(r"\s*```$", "", content).strip()
+        m = re.search(r"\{.*\}", content, re.S)
+        if m:
+            content = m.group(0)
+        parsed = _try_parse_json_relaxed(content)
+        if not parsed:
+            raise ValueError(f"Could not parse agent JSON: {content[:120]}")
+
+        if mode == "plan":
+            plan = parsed.get("plan", [])
+            logger.info("Agent plan: %d steps", len(plan))
+            return {"plan": plan, "reason": str(parsed.get("reason", ""))}
+
+        action = parsed.get("action", "done")
+        result: dict = {"action": action, "reason": str(parsed.get("reason", ""))}
+        if action in ("click", "type"):
+            result["x"] = int(float(parsed.get("x", 0)))
+            result["y"] = int(float(parsed.get("y", 0)))
+        if action == "type":
+            result["text"] = str(parsed.get("text", ""))
+        if action == "press_key":
+            result["key"] = str(parsed.get("key", "Enter"))
+        logger.info("Agent step: action=%s reason=%s", action, result["reason"])
+        return result
+    except Exception as exc:
+        logger.warning("Agent step failed: %s", exc)
+        return {"action": "done", "reason": f"Error: {exc}"}
+
+
+
 
 CHAT_SYSTEM_PROMPT = (
     "You are an intelligent assistant helping the user with study and question answering.\n"

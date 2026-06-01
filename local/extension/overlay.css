@@ -8,6 +8,22 @@
   z-index: 2147483647;
 }
 
+@keyframes auto-click-flash {
+  0%   { transform: scale(0.5); opacity: 1; }
+  100% { transform: scale(2.5); opacity: 0; }
+}
+
+.auto-click-flash {
+  position: fixed;
+  pointer-events: none;
+  border-radius: 50%;
+  border: 3px solid #4ade80;
+  box-shadow: 0 0 14px #4ade80, 0 0 4px #fff;
+  animation: auto-click-flash 0.45s ease-out forwards;
+  z-index: 2147483647;
+}
+
+
 #mangaAutoScanButton {
   position: fixed;
   right: 18px;

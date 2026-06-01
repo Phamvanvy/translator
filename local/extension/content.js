@@ -34,6 +34,8 @@ let shadowRoot = null;
 let lastCaptureTimestamp = 0;
 let fabDragState = { active: false, moved: false, startX: 0, startY: 0, originLeft: 0, originTop: 0 };
 let llmButton = null;
+let autoClickButton = null;
+let autoClickAnswer = localStorage.getItem("autoClickAnswer") === "true";
 // Chat state (shared with content-chat.js)
 let attachedChatImages = []; // array of base64 data URLs
 let lastAskContext = "";     // context for follow-up questions
@@ -143,6 +145,9 @@ function createUI() {
     .chat-msg.bot pre code { background: none; padding: 0; color: #e2e8f0; }
     .chat-msg.bot strong { color: #f8fafc; font-weight: 700; }
     .chat-msg.bot em { color: #cbd5e1; font-style: italic; }
+    #btn-auto-click { font-weight: 600 !important; }
+    #btn-auto-click.active { background: rgba(74,222,128,0.18) !important; border: 1px solid rgba(74,222,128,0.5) !important; color: #4ade80 !important; }
+    #btn-auto-click:not(.active) { color: #94a3b8 !important; }
     .chat-msg.bot h2, .chat-msg.bot h3 { font-size: 13px; font-weight: 700; color: #38bdf8; margin: 8px 0 3px; border-bottom: 1px solid rgba(56,189,248,0.2); padding-bottom: 2px; }
     .selection-overlay { position: fixed; inset: 0; background: rgba(20,24,32,0.22); cursor: crosshair; pointer-events: auto; display: none; }
     .region-box { position: fixed; border: 2px dashed #38bdf8; background: rgba(56,189,248,0.16); pointer-events: none; display: none; }
@@ -169,7 +174,9 @@ function createUI() {
         </div>
         <button id="btn-start">Start Scan</button>
         <button id="btn-fullpage">Scan Full Page</button>
+        <button id="btn-agent">&#129302; Run Agent</button>
         <button id="btn-upload-ask">&#128228; Upload &amp; Ask</button>
+        <button id="btn-auto-click">&#128432; Auto Click: OFF</button>
         <button id="btn-select">Select Region</button>
         <button id="btn-clear">Clear Region</button>
         <button id="btn-glossary">Glossary</button>
@@ -215,6 +222,14 @@ function createUI() {
   fabButton.addEventListener("click", onFabClicked);
   startButton.addEventListener("click", onStartStopClicked);
   shadow.getElementById("btn-fullpage").addEventListener("click", () => scanFullPage());
+  shadow.getElementById("btn-agent").addEventListener("click", () => {
+    const task = window.prompt(
+      "Mô tả nhiệm vụ cho Agent:\n(Agent sẽ tự scroll, click, điền form để hoàn thành)",
+      "Answer all quiz questions on this page"
+    );
+    if (task === null) return;
+    runAgentLoop(task.trim() || "Complete the task on this page");
+  });
   selectButton.addEventListener("click", onSelectClicked);
   clearButton.addEventListener("click", onClearClicked);
   glossaryButton = shadow.getElementById("btn-glossary");
@@ -229,6 +244,14 @@ function createUI() {
 
   shadow.getElementById("btn-mode-translate").addEventListener("click", () => setAppMode("translate"));
   shadow.getElementById("btn-mode-ask").addEventListener("click", () => setAppMode("ask"));
+  autoClickButton = shadow.getElementById("btn-auto-click");
+  autoClickButton.addEventListener("click", () => {
+    autoClickAnswer = !autoClickAnswer;
+    localStorage.setItem("autoClickAnswer", autoClickAnswer ? "true" : "false");
+    updateAutoClickButton();
+    setStatus("Auto Click: " + (autoClickAnswer ? "ON" : "OFF"));
+  });
+  updateAutoClickButton();
   updateModeUI();
   updateLLMButton();
 
@@ -478,6 +501,12 @@ function updateModeUI() {
   const btnA = shadowRoot.getElementById("btn-mode-ask");
   if (btnT) btnT.classList.toggle("active", appMode === "translate");
   if (btnA) btnA.classList.toggle("active", appMode === "ask");
+}
+
+function updateAutoClickButton() {
+  if (!autoClickButton) return;
+  autoClickButton.classList.toggle("active", autoClickAnswer);
+  autoClickButton.textContent = (autoClickAnswer ? "\u{1F5B1} Auto Click: ON" : "\u{1F5B1} Auto Click: OFF");
 }
 
 // ===== Q&A / Glossary / Character =====

@@ -458,6 +458,210 @@ function renderAnnotations(items, rect, cleanedImageUrl) {
 
 // ── Full-page sequential scan ─────────────────────────────────────────────────
 
+// ── Autonomous agent loop ─────────────────────────────────────────────────────
+
+function getDomContext() {
+  const sel = 'button, input:not([type="hidden"]), select, textarea, a[href], [role="button"], [role="radio"], [role="checkbox"], [role="option"], label';
+  const result = [];
+  try {
+    document.querySelectorAll(sel).forEach(el => {
+      const rect = el.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      if (rect.bottom < 0 || rect.top > window.innerHeight || rect.right < 0 || rect.left > window.innerWidth) return;
+      const text = (el.getAttribute('aria-label') || el.textContent || el.value || el.placeholder || '')
+        .trim().replace(/\s+/g, ' ').slice(0, 70);
+      if (!text) return;
+      result.push({
+        tag: el.tagName.toLowerCase(),
+        text,
+        x: Math.round(rect.left + rect.width / 2),
+        y: Math.round(rect.top + rect.height / 2),
+      });
+    });
+  } catch (_) {}
+  return result.slice(0, 60);
+}
+
+async function _agentCallStep(dataUrl, viewportW, viewportH, stepHistory, task, mode = "act") {
+  const reqPayload = {
+    image: dataUrl,
+    viewport_width: viewportW,
+    viewport_height: viewportH,
+    step_history: stepHistory.slice(-6),
+    dom_context: getDomContext(),
+    task,
+    mode,
+  };
+  const llmUrl = localStorage.getItem("autoScanLLMUrl") || "";
+  const llmModel = localStorage.getItem("autoScanLLMModel") || "";
+  if (llmUrl) reqPayload.llm_url = llmUrl;
+  if (llmModel) reqPayload.llm_model = llmModel;
+  return new Promise((resolve, reject) => {
+    const tid = setTimeout(() => reject(new Error("Agent step timeout")), 90000);
+    chrome.runtime.sendMessage(
+      { action: "proxyFetch", url: `${SERVER_URL}/api/agent/step`, method: "POST", body: JSON.stringify(reqPayload) },
+      (r) => {
+        clearTimeout(tid);
+        if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+        if (!r || !r.ok) return reject(new Error(r?.error || "Server error"));
+        resolve(r.data);
+      }
+    );
+  });
+}
+
+async function _agentCapture() {
+  const viewportW = window.innerWidth;
+  const viewportH = window.innerHeight;
+  return new Promise(resolve => {
+    chrome.runtime.sendMessage({ action: "captureVisibleTab" }, async response => {
+      if (!chrome.runtime.lastError && response && !response.error) {
+        try {
+          const rect = { left: 0, top: 0, width: viewportW, height: viewportH };
+          resolve({ dataUrl: await cropDataUrl(response.dataUrl, rect), w: viewportW, h: viewportH });
+        } catch (e) { resolve(null); }
+      } else { resolve(null); }
+    });
+  });
+}
+
+async function runAgentLoop(task) {
+  if (scanMode) return;
+  scanMode = true;
+  updateButtons();
+  switchTab("chat");
+
+  const MAX_STEPS = 50;
+  const stepHistory = [];
+  let stepsRun = 0;
+
+  try {
+    // ── Planning phase ──────────────────────────────────────────────────────
+    setStatus("Agent: planning...");
+    const cap0 = await _agentCapture();
+    if (cap0) {
+      try {
+        const planResult = await _agentCallStep(cap0.dataUrl, cap0.w, cap0.h, [], task, "plan");
+        const steps = planResult.plan || [];
+        if (steps.length > 0) {
+          const stepsHtml = steps.map((s, i) => `<div style="padding:2px 0">${i+1}. ${_escapeHtml(s)}</div>`).join('');
+          appendChatMessage("bot",
+            `<div class="chat-q-label">🤖 Agent Plan</div>${stepsHtml}` +
+            (planResult.reason ? `<div style="color:#64748b;font-size:11px;margin-top:5px">${_escapeHtml(planResult.reason)}</div>` : '')
+          );
+        }
+      } catch (_) { /* planning failed, continue anyway */ }
+    }
+    if (!scanMode) return;
+
+    appendChatMessage("bot", `<em style="color:#4ade80">▶ Executing — press Stop to halt</em>`);
+
+    // ── Execution loop ──────────────────────────────────────────────────────
+    for (let step = 0; step < MAX_STEPS && scanMode; step++) {
+      stepsRun = step + 1;
+      setStatus(`Agent step ${stepsRun}/${MAX_STEPS}...`);
+
+      const cap = await _agentCapture();
+      if (!cap) { setStatus("Agent: capture failed.", true); break; }
+
+      let agentAction;
+      try {
+        agentAction = await _agentCallStep(cap.dataUrl, cap.w, cap.h, stepHistory, task, "act");
+      } catch (err) {
+        setStatus(`Agent error: ${err.message}`, true);
+        appendChatMessage("bot", `<em style="color:#f87171">❌ Agent error: ${_escapeHtml(err.message)}</em>`);
+        break;
+      }
+
+      stepHistory.push(agentAction);
+      const reason = agentAction.reason ? ` — ${agentAction.reason}` : "";
+
+      if (agentAction.action === "done") {
+        setStatus("✅ Agent complete.");
+        appendChatMessage("bot", `<em>✅ Agent finished${reason}.</em>`);
+        break;
+      }
+
+      if (agentAction.action === "scroll_down") {
+        appendChatMessage("bot", `<em>⬇️ Scroll down${reason}</em>`);
+        window.scrollBy({ top: Math.round(cap.h * 0.8), behavior: "smooth" });
+        await new Promise(r => setTimeout(r, 900));
+        continue;
+      }
+
+      if (agentAction.action === "scroll_up") {
+        appendChatMessage("bot", `<em>⬆️ Scroll up${reason}</em>`);
+        window.scrollBy({ top: -Math.round(cap.h * 0.8), behavior: "smooth" });
+        await new Promise(r => setTimeout(r, 900));
+        continue;
+      }
+
+      if (agentAction.action === "click") {
+        const x = agentAction.x, y = agentAction.y;
+        appendChatMessage("bot", `<em>🖱 Click (${x}, ${y})${reason}</em>`);
+        showAutoClickFlash(x, y);
+        await new Promise(r => setTimeout(r, 220));
+        const target = document.elementFromPoint(x, y);
+        if (target && target !== document.documentElement && target !== document.body) {
+          target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+          target.dispatchEvent(new MouseEvent("mouseup",   { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+          target.dispatchEvent(new MouseEvent("click",     { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+        }
+        await new Promise(r => setTimeout(r, 1400));
+        continue;
+      }
+
+      if (agentAction.action === "type") {
+        const x = agentAction.x, y = agentAction.y;
+        const text = agentAction.text || "";
+        appendChatMessage("bot", `<em>⌨️ Type "${_escapeHtml(text.slice(0, 40))}"${reason}</em>`);
+        const target = document.elementFromPoint(x, y);
+        if (target) {
+          target.focus();
+          target.click();
+          await new Promise(r => setTimeout(r, 80));
+          // Native input setter for React/Vue compatibility
+          const nativeInputSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+          if (nativeInputSetter && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) {
+            nativeInputSetter.set.call(target, text);
+            target.dispatchEvent(new Event('input', { bubbles: true }));
+            target.dispatchEvent(new Event('change', { bubbles: true }));
+          } else {
+            document.execCommand('selectAll', false, null);
+            document.execCommand('insertText', false, text);
+          }
+        }
+        await new Promise(r => setTimeout(r, 600));
+        continue;
+      }
+
+      if (agentAction.action === "press_key") {
+        const key = agentAction.key || "Enter";
+        appendChatMessage("bot", `<em>⌨️ Press ${_escapeHtml(key)}${reason}</em>`);
+        const activeEl = document.activeElement || document.body;
+        activeEl.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+        activeEl.dispatchEvent(new KeyboardEvent("keyup",   { key, bubbles: true }));
+        if (key === "Enter") {
+          activeEl.dispatchEvent(new KeyboardEvent("keypress", { key, bubbles: true }));
+        }
+        await new Promise(r => setTimeout(r, 1000));
+        continue;
+      }
+
+      setStatus("Agent: unrecognized action, stopping.", true);
+      break;
+    }
+
+    if (stepsRun >= MAX_STEPS) {
+      setStatus("Agent: max steps reached.");
+      appendChatMessage("bot", `<em>⚠️ Agent stopped after ${MAX_STEPS} steps.</em>`);
+    }
+  } finally {
+    scanMode = false;
+    updateButtons();
+  }
+}
+
 async function scanFullPage() {
   if (scanMode) return;
   const originalScrollY = window.scrollY;
@@ -465,6 +669,66 @@ async function scanFullPage() {
   updateButtons();
   switchTab("chat");
 
+  // ── Ask mode: process each viewport section one-by-one ───────────────────
+  if (appMode === "ask") {
+    try {
+      window.scrollTo({ top: 0, behavior: "instant" });
+      await new Promise(r => setTimeout(r, 600));
+      const viewportH = window.innerHeight;
+      const viewportW = window.innerWidth;
+      const totalPageH = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+      const maxScrollY = Math.max(0, totalPageH - viewportH);
+      const step = viewportH;
+      const scrollTargets = [0];
+      if (maxScrollY > 0) {
+        for (let pos = step; pos < maxScrollY; pos += step) scrollTargets.push(pos);
+        if (scrollTargets[scrollTargets.length - 1] < maxScrollY) scrollTargets.push(maxScrollY);
+      }
+      appendChatMessage("bot", `<em>🔍 Ask mode: scanning ${scrollTargets.length} section(s)...</em>`);
+      let lastScrollY = -1;
+      let lastSectionHash = null;
+      for (let i = 0; i < scrollTargets.length && scanMode; i++) {
+        window.scrollTo({ top: scrollTargets[i], behavior: "instant" });
+        await new Promise(r => setTimeout(r, 500));
+        const currentScrollY = window.scrollY || document.documentElement.scrollTop || 0;
+        if (i > 0 && currentScrollY === lastScrollY) {
+          setStatus("Page didn't scroll further, stopping.");
+          break;
+        }
+        lastScrollY = currentScrollY;
+        setStatus(`Asking section ${i + 1}/${scrollTargets.length}...`);
+        const dataUrl = await new Promise(resolve => {
+          chrome.runtime.sendMessage({ action: "captureVisibleTab" }, async response => {
+            if (!chrome.runtime.lastError && response && !response.error) {
+              try {
+                const rect = { left: 0, top: 0, width: viewportW, height: viewportH };
+                resolve(await cropDataUrl(response.dataUrl, rect));
+              } catch (e) { resolve(null); }
+            } else { resolve(null); }
+          });
+        });
+        if (!dataUrl) continue;
+        try {
+          const imageData = await getImageDataFromDataUrl(dataUrl);
+          const hash = hashImageData(imageData);
+          if (lastSectionHash && hash === lastSectionHash) { setStatus("Duplicate section, stopping."); break; }
+          lastSectionHash = hash;
+        } catch (_) {}
+        const viewRect = { left: 0, top: 0, width: viewportW, height: viewportH };
+        await sendToServerAsk(dataUrl, viewRect);
+        // Wait for page to react to click (auto-advance, animations, etc.)
+        if (autoClickAnswer) await new Promise(r => setTimeout(r, 1800));
+      }
+      setStatus(`✅ Full page Ask complete.`);
+    } finally {
+      window.scrollTo({ top: originalScrollY, behavior: "smooth" });
+      scanMode = false;
+      updateButtons();
+    }
+    return;
+  }
+
+  // ── Translate mode: collect all sections then attach ─────────────────────
   try {
     window.scrollTo({ top: 0, behavior: "instant" });
     await new Promise(r => setTimeout(r, 600));

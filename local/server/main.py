@@ -14,7 +14,7 @@ from typing import Dict, List, Optional
 from glossary_store import get_glossary, update_glossary
 from ocr import decode_image, merge_text_lines, ocr_image, inpaint_text_regions
 from qa_store import add_qa_entry, find_relevant_qa, get_all_qa, remove_qa_entry
-from translate import ask_question, chat_with_model, chat_with_model_stream, translate_text_blocks, translate_with_vision
+from translate import agent_step, ask_question, chat_with_model, chat_with_model_stream, translate_text_blocks, translate_with_vision
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("translator_server")
@@ -89,6 +89,18 @@ class ChatRequest(BaseModel):
     context: str = ""
     history: Optional[List[dict]] = None
     images: Optional[List[str]] = None  # list of base64 data URLs for vision
+
+
+class AgentStepRequest(BaseModel):
+    image: str
+    viewport_width: int = 1280
+    viewport_height: int = 720
+    step_history: Optional[List[dict]] = None
+    dom_context: Optional[List[dict]] = None
+    task: str = ""
+    mode: str = "act"  # "act" | "plan"
+    llm_url: Optional[str] = None
+    llm_model: Optional[str] = None
 
 
 def encode_image_to_data_url(image: np.ndarray) -> str:
@@ -278,3 +290,28 @@ def api_chat_stream(request: ChatRequest):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Autonomous agent step
+# ──────────────────────────────────────────────────────────────────────────────
+
+@app.post("/api/agent/step")
+def api_agent_step(request: AgentStepRequest):
+    """Given a viewport screenshot, decide the next autonomous action."""
+    try:
+        result = agent_step(
+            request.image,
+            viewport_width=request.viewport_width,
+            viewport_height=request.viewport_height,
+            step_history=request.step_history,
+            dom_context=request.dom_context,
+            task=request.task,
+            mode=request.mode,
+            llm_url=request.llm_url,
+            llm_model=request.llm_model,
+        )
+        return result
+    except Exception as exc:
+        logger.exception("Agent step failed")
+        raise HTTPException(status_code=500, detail=str(exc))

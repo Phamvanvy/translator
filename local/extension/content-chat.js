@@ -266,6 +266,41 @@ async function sendChatMessage(userText) {
   }
 }
 
+// ── Auto-click answer boxes ───────────────────────────────────────────────────
+
+function showAutoClickFlash(screenX, screenY) {
+  if (!shadowRoot) return;
+  const SIZE = 36;
+  const el = document.createElement("div");
+  el.className = "auto-click-flash";
+  el.style.cssText = `left:${Math.round(screenX - SIZE / 2)}px;top:${Math.round(screenY - SIZE / 2)}px;width:${SIZE}px;height:${SIZE}px;`;
+  // Flash must live outside shadow DOM to overlay any element on page
+  document.documentElement.appendChild(el);
+  el.addEventListener("animationend", () => el.remove(), { once: true });
+}
+
+function autoClickAnswers(results, rect) {
+  if (!results || !rect) return;
+  const answers = results.filter(r => r.is_answer);
+  if (answers.length === 0) return;
+  answers.forEach((r, i) => {
+    const [left, top, right, bottom] = r.box;
+    const screenX = rect.left + (left + right) / 2;
+    const screenY = rect.top + (top + bottom) / 2;
+    setTimeout(() => {
+      showAutoClickFlash(screenX, screenY);
+      setTimeout(() => {
+        const target = document.elementFromPoint(screenX, screenY);
+        if (target && target !== document.documentElement && target !== document.body) {
+          target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, clientX: screenX, clientY: screenY }));
+          target.dispatchEvent(new MouseEvent("mouseup",   { bubbles: true, cancelable: true, clientX: screenX, clientY: screenY }));
+          target.dispatchEvent(new MouseEvent("click",     { bubbles: true, cancelable: true, clientX: screenX, clientY: screenY }));
+        }
+      }, 220);
+    }, i * 400);
+  });
+}
+
 // ── Ask / Quiz result display ─────────────────────────────────────────────────
 
 async function sendToServerAsk(dataUrl, rect) {
@@ -295,6 +330,11 @@ async function sendToServerAsk(dataUrl, rect) {
     const questions = result.questions || [];
     const totalAnswers = questions.reduce((s, q) => s + (q.answer_texts || []).length, 0);
     setStatus(`✅ ${questions.length} questions, ${totalAnswers} answers`);
+
+    // Auto-click correct answer boxes on the page if enabled
+    if (autoClickAnswer && result.results) {
+      autoClickAnswers(result.results, rect);
+    }
 
     lastAskContext = questions.map((q, i) => {
       const ans = (q.answer_texts || []).join(", ");

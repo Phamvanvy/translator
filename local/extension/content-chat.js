@@ -170,11 +170,19 @@ async function sendChatMessage(userText) {
     history: chatHistory.slice(-8),
     ...(images.length > 0 ? { images } : {}),
   });
+  let clientTokenCount = 0;
+  const connectTime = Date.now();
   await new Promise((resolve) => {
+    console.log("[chat] connecting proxyStream port at", connectTime);
     const port = chrome.runtime.connect({ name: "proxyStream" });
+    console.log("[chat] connected proxyStream port at", Date.now(), "elapsed:", Date.now() - connectTime);
     port.postMessage({ url: `${SERVER_URL}/api/chat/stream`, body: reqBody });
+    console.log("[chat] posted message to proxyStream");
     port.onMessage.addListener((msg) => {
+      // Ignore heartbeat pings from background proxy
+      if (msg._hb) return;
       if (msg.error) {
+        console.error("[chat] error:", msg.error);
         if (cursor.parentNode) cursor.remove();
         msgEl.innerHTML = `<span style="color:#f87171">Lỗi: ${_escapeHtml(msg.error)}</span>`;
         port.disconnect();
@@ -182,11 +190,13 @@ async function sendChatMessage(userText) {
         return;
       }
       if (msg.done) {
+        console.log("[chat] done — fullText length:", fullText.length, "tokens received:", clientTokenCount);
         chatHistory.push({ role: "assistant", content: fullText });
         if (fullText) {
           msgEl.innerHTML = formatMarkdown(fullText);
         } else if (!tokenOverflow) {
           // No response — show retry button
+          console.warn("[chat] done with empty fullText and no tokenOverflow");
           msgEl.innerHTML = '';
           const retryBtn = document.createElement("button");
           retryBtn.className = "chat-retry-btn";
@@ -209,19 +219,24 @@ async function sendChatMessage(userText) {
       }
       if (msg.line) {
         const payload = msg.line;
-        if (payload === "[DONE]") return;
+        if (payload === "[DONE]") {
+          console.log("[chat] received [DONE] after", clientTokenCount, "tokens");
+          return;
+        }
         try {
           const parsed = JSON.parse(payload);
           if (parsed.error) {
             if (parsed.type === "token_overflow") {
               // Mark for auto-retry after the promise completes
               tokenOverflow = true;
+              console.warn("[chat] token_overflow detected");
               if (cursor.parentNode) cursor.remove();
               msgEl.innerHTML = '<em style="color:#f59e0b;font-size:11px">⚡ Context too large — resetting and retrying...</em>';
               port.disconnect();
               resolve();
               return;
             }
+            console.error("[chat] parsed error:", parsed.error);
             if (cursor.parentNode) cursor.remove();
             msgEl.innerHTML = `<span style="color:#f87171">Lỗi: ${_escapeHtml(parsed.error)}</span>`;
             port.disconnect();
@@ -230,6 +245,8 @@ async function sendChatMessage(userText) {
           }
           const token = parsed.token || "";
           if (token) {
+            clientTokenCount++;
+            if (clientTokenCount <= 3) console.log("[chat] token", clientTokenCount, ":", token.substring(0, 40));
             fullText += token;
             msgEl.innerHTML = formatMarkdown(fullText);
             msgEl.appendChild(cursor);
@@ -239,6 +256,7 @@ async function sendChatMessage(userText) {
       }
     });
     port.onDisconnect.addListener(() => {
+      console.log("[chat] port disconnected at", Date.now(), "elapsed:", Date.now() - connectTime, "ms, fullText length:", fullText.length, "tokens:", clientTokenCount);
       if (fullText && !chatHistory.find(m => m.role === "assistant" && m.content === fullText)) {
         chatHistory.push({ role: "assistant", content: fullText });
       }

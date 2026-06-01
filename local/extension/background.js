@@ -52,36 +52,90 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // Proxy SSE streaming requests via long-lived port connection
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "proxyStream") return;
+  console.log("[proxyStream] port connected");
+  let tokenCount = 0;
+  let heartbeatTimer = null;
+  const HEARTBEAT_INTERVAL = 15000; // send ping every 15s to prevent Chrome's 30s idle disconnect
+
+  function startHeartbeat() {
+    stopHeartbeat();
+    heartbeatTimer = setInterval(() => {
+      try { port.postMessage({ _hb: true }); } catch (_) { stopHeartbeat(); }
+    }, HEARTBEAT_INTERVAL);
+  }
+  function stopHeartbeat() {
+    if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+  }
+
+  // Start heartbeat immediately to keep port alive from the very first second
+  startHeartbeat();
+
   port.onMessage.addListener(async (req) => {
+    console.log("[proxyStream] request to:", req.url);
     try {
+      // Immediately start forwarding SSE data to keep port alive
+      // This must happen BEFORE awaiting fetch so the port doesn't die during server processing
       const resp = await fetch(req.url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: req.body,
       });
+      console.log("[proxyStream] fetch done, status:", resp.status);
       if (!resp.ok) {
+        console.error("[proxyStream] HTTP error:", resp.status);
         port.postMessage({ error: `HTTP ${resp.status}` });
         return;
       }
+      console.log("[proxyStream] starting SSE read loop");
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
+      let firstChunk = true;
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
+        if (done) {
+          console.log("[proxyStream] reader done after", tokenCount, "tokens");
+          break;
+        }
+        const text = decoder.decode(value, { stream: true });
+        console.log("[proxyStream] raw chunk:", text.substring(0, 200));
+        buf += text;
         const lines = buf.split("\n");
         buf = lines.pop();
         for (const line of lines) {
           if (line.startsWith("data:")) {
-            port.postMessage({ line: line.slice(5).trim() });
+            const payload = line.slice(5).trim();
+            if (payload === "[DONE]") {
+              console.log("[proxyStream] received [DONE] after", tokenCount, "tokens");
+            } else {
+              tokenCount++;
+              if (tokenCount <= 5) console.log("[proxyStream] token", tokenCount, ":", payload.substring(0, 100));
+            }
+            console.log("[proxyStream] forwarding to content:", payload.substring(0, 100));
+            // Keep port alive by posting every chunk immediately
+            port.postMessage({ line: payload });
+            // Signal on first chunk that the connection is good
+            if (firstChunk) { firstChunk = false; }
           }
         }
       }
-      if (buf.startsWith("data:")) port.postMessage({ line: buf.slice(5).trim() });
+      // Check last buffered line
+      if (buf.startsWith("data:")) {
+        console.log("[proxyStream] final buffer:", buf.substring(0, 60));
+        port.postMessage({ line: buf.slice(5).trim() });
+      }
+      console.log("[proxyStream] sending { done: true }");
       port.postMessage({ done: true });
     } catch (err) {
+      console.error("[proxyStream] exception:", err.message);
       try { port.postMessage({ error: err.message }); } catch (_) {}
+    } finally {
+      stopHeartbeat();
     }
+  });
+
+  port.onDisconnect.addListener(() => {
+    console.log("[proxyStream] port disconnected after", tokenCount, "tokens");
+    stopHeartbeat();
   });
 });

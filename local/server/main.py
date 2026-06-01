@@ -1,5 +1,6 @@
 import base64
 import logging
+import os
 import re
 from typing import List
 
@@ -15,6 +16,9 @@ from glossary_store import get_glossary, update_glossary
 from ocr import decode_image, merge_text_lines, ocr_image, inpaint_text_regions
 from qa_store import add_qa_entry, get_all_qa, remove_qa_entry
 from translate import agent_step, ask_question, ask_question_vision, chat_with_model, chat_with_model_stream, translate_text_blocks, translate_with_vision
+
+# SSE timeout in seconds — must exceed worst-case LLM response time
+SSE_TIMEOUT = int(os.environ.get("SSE_TIMEOUT", "300"))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("translator_server")
@@ -273,13 +277,18 @@ def api_chat(request: ChatRequest):
 def api_chat_stream(request: ChatRequest):
     """Stream chat response via SSE."""
     if not request.message.strip() and not request.images:
-        raise HTTPException(status_code=400, detail="message or images must not be empty")
+        raise HTTPException(status_code=400, detail="message or images must be empty")
+    # Increase stream timeout to 600s (10 minutes) for slow LLMs
+    read_timeout = float(os.environ.get("CHAT_STREAM_TIMEOUT", "600"))
+    keepalive_interval = float(os.environ.get("CHAT_STREAM_KEEPALIVE", "25"))  # keepalive every 25s to prevent Chrome port timeout
     return StreamingResponse(
         chat_with_model_stream(
             message=request.message,
             context=request.context,
             history=request.history,
             images=request.images,
+            read_timeout=read_timeout,
+            keepalive_interval=keepalive_interval,
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},

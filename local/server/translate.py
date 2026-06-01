@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Dict, List, Optional
 
 from env_loader import load_dotenv
@@ -14,6 +15,7 @@ logger = logging.getLogger("translator_server.translate")
 LMSTUDIO_URL = os.getenv("LMSTUDIO_URL", os.getenv("OLLAMA_URL", "http://127.0.0.1:11434"))
 LMSTUDIO_MODEL = os.getenv("LMSTUDIO_MODEL", os.getenv("OLLAMA_MODEL", "gemma2"))
 LMSTUDIO_TIMEOUT = int(os.getenv("LMSTUDIO_TIMEOUT", os.getenv("OLLAMA_TIMEOUT", "60")))
+AGENT_TIMEOUT = int(os.getenv("AGENT_TIMEOUT", "300"))  # Agent vision needs more time for large screenshots
 
 SYSTEM_PROMPT_BASE = (
     "You are a senior Chinese-to-Vietnamese visual novel translator. "
@@ -115,7 +117,7 @@ def extract_content_from_response(data: dict, endpoint: str) -> str:
     else:
         raise ValueError(f"Unexpected LMStudio/Qwen response format from {endpoint}: {data}")
     # Strip Qwen3 / DeepSeek thinking tokens <think>...</think>
-    return re.sub(r"<think>.*?</think>", "", raw, flags=re.S).strip()
+    return re.sub(r"</think>.*?</think>", "", raw, flags=re.S).strip()
 
 
 def _try_parse_json_relaxed(text: str):
@@ -124,11 +126,8 @@ def _try_parse_json_relaxed(text: str):
         return json.loads(text)
     except Exception:
         pass
-    # Replace Python single-quoted strings with double-quoted JSON.
-    # Strategy: replace ' with " only around keys/values, preserving apostrophes inside values.
-    # Simple but effective: replace outer single quotes on keys and on string values.
+    # Replace Python single-quoted keys/values with double-quoted JSON.
     try:
-        # Replace single-quoted keys: 'key' -> "key"
         converted = re.sub(r"'([^'\\]*(?:\\.[^'\\]*)*)'", lambda m: '"' + m.group(1).replace('"', '\\"') + '"', text)
         return json.loads(converted)
     except Exception:
@@ -145,7 +144,6 @@ def parse_vision_json_response(response_text: str, count: int) -> List[str]:
     trimmed = re.sub(r"\s*```$", "", trimmed).strip()
 
     # Try structured format: {"translations": [{box_id, vietnamese_text, ...}]}
-    # Handles both valid JSON (double quotes) and Python-repr (single quotes).
     data = _try_parse_json_relaxed(trimmed)
     if data and isinstance(data, dict) and "translations" in data:
         items = data["translations"]
@@ -581,7 +579,7 @@ def _parse_ask_json(text: str) -> dict:
     """Parse LLM ask response. Returns dict with 'questions' list."""
     trimmed = text.strip()
     # Strip thinking tokens (Qwen3, DeepSeek-R1, etc.)
-    trimmed = re.sub(r"<think>.*?</think>", "", trimmed, flags=re.S).strip()
+    trimmed = re.sub(r"</think>.*?</think>", "", trimmed, flags=re.S).strip()
     # Strip markdown code fences
     trimmed = re.sub(r"^```[a-zA-Z]*\s*", "", trimmed)
     trimmed = re.sub(r"\s*```$", "", trimmed).strip()
@@ -849,7 +847,7 @@ def agent_step(
     endpoint = f"{llm_url}/v1/chat/completions"
     try:
         for attempt in range(2):
-            response = requests.post(endpoint, json=payload, timeout=(10, LMSTUDIO_TIMEOUT))
+            response = requests.post(endpoint, json=payload, timeout=(10, AGENT_TIMEOUT))
             response.raise_for_status()
             content = extract_content_from_response(response.json(), endpoint)
             logger.info("Agent raw content attempt %d (%d chars): %s", attempt + 1, len(content), content[:300])
@@ -951,16 +949,22 @@ def chat_with_model(
 
     endpoint = f"{llm_url}/v1/chat/completions"
     try:
-        response = requests.post(endpoint, json=payload, timeout=(10, LMSTUDIO_TIMEOUT))
+        # Use a longer connect timeout (60s) for slow LLM startup
+        response = requests.post(endpoint, json=payload, timeout=(60, LMSTUDIO_TIMEOUT))
         response.raise_for_status()
         data = response.json()
         return extract_content_from_response(data, endpoint).strip()
+    except (requests.ReadTimeout, requests.ConnectTimeout) as exc:
+        logger.warning("Chat request timed out after 60s connect, %ds read: %s", LMSTUDIO_TIMEOUT, exc)
+        raise RuntimeError(f"Chat request timed out (connect=60s, read={LMSTUDIO_TIMEOUT}s): {exc}") from exc
     except Exception as exc:
         logger.warning("Chat request failed: %s", exc)
         raise RuntimeError(f"Chat request failed: {exc}") from exc
 
 
 from typing import Generator
+import urllib.request
+import urllib.error
 
 
 def _is_token_overflow_error(msg: str) -> bool:
@@ -984,8 +988,17 @@ def chat_with_model_stream(
     images: Optional[List[str]] = None,
     llm_url: Optional[str] = None,
     llm_model: Optional[str] = None,
+    keepalive_interval: float = 10.0,
+    read_timeout: float = 300.0,
 ) -> Generator[str, None, None]:
-    """Stream chat response from LLM as SSE lines."""
+    """Stream chat response from LLM as SSE lines using urllib.
+
+    Uses urllib.request.urlopen with explicit read timeout to avoid blocking
+    forever when the remote LLM silently stops sending SSE events.
+
+    Sends periodic keepalive comments (``:\n\n``) to prevent Chrome extension
+    port timeout when the LLM is slow to produce tokens.
+    """
     messages = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}]
 
     if context:
@@ -1023,34 +1036,96 @@ def chat_with_model_stream(
     }
 
     endpoint = f"{llm_url}/v1/chat/completions"
+    stream_finished = False
+    client_disconnected = False
+    token_count = 0
+    last_output_time = time.time()
+    last_keepalive_time = time.time()
+
+    logger.info("chat_with_model_stream: starting stream to %s", endpoint)
+    print(f"[DEBUG] chat_with_model_stream: starting stream to {endpoint}")
+
+    # Encode JSON body for urllib
+    body_bytes = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        endpoint,
+        data=body_bytes,
+        method="POST",
+    )
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "text/event-stream")
+
+    urlopen = None
     try:
-        with requests.post(
-            endpoint,
-            json=payload,
-            timeout=(10, LMSTUDIO_TIMEOUT),
-            stream=True,
-        ) as resp:
-            # Handle non-streaming HTTP error before iterating
-            if resp.status_code != 200:
-                try:
-                    err_data = resp.json()
-                    err_obj = err_data.get("error") or {}
-                    err_msg = (err_obj.get("message") if isinstance(err_obj, dict) else str(err_obj)) or f"HTTP {resp.status_code}"
-                except Exception:
-                    err_msg = f"HTTP {resp.status_code}"
-                err_type = "token_overflow" if _is_token_overflow_error(err_msg) else "server_error"
-                logger.warning("LMStudio returned %s: %s", resp.status_code, err_msg)
-                yield f"data: {json.dumps({'error': err_msg, 'type': err_type})}\n\n"
+        urlopen = urllib.request.urlopen(req, timeout=60)  # connect timeout 60s for slow LLM startup
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        err_body = ""
+        try:
+            err_body = (exc.read()).decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        logger.warning("LMStudio returned HTTP %d: %s", status, err_body[:200])
+        err_type = "server_error"
+        yield f"data: {json.dumps({'error': f'HTTP {status}: {err_body[:100]}', 'type': err_type})}\n\n"
+        return
+    except urllib.error.URLError as exc:
+        logger.warning("LMStudio connection failed: %s", exc.reason)
+        yield f"data: {json.dumps({'error': str(exc.reason), 'type': 'server_error'})}\n\n"
+        return
+    except Exception as exc:
+        logger.warning("LMStudio request failed: %s", exc)
+        yield f"data: {json.dumps({'error': str(exc), 'type': 'server_error'})}\n\n"
+        return
+
+    try:
+        # Read SSE lines with explicit read timeout per line
+        idle_lines = 0
+        idle_limit = 300
+        buffer = b""
+
+        while True:
+            try:
+                chunk = urlopen.read(8192)  # read up to 8KB, blocks for read_timeout seconds
+            except urllib.error.HTTPError as exc:
+                logger.warning("LMStudio stream HTTP error: %s", exc)
+                yield f"data: {json.dumps({'error': f'HTTP {exc.code}', 'type': 'server_error'})}\n\n"
+                stream_finished = True
+                return
+            except Exception as exc:
+                # Read timeout or connection error — LLM stopped sending
+                logger.warning("chat_with_model_stream: stream read error after %d tokens: %s", token_count, exc)
+                yield "data: [DONE]\n\n"
+                stream_finished = True
                 return
 
-            for raw_line in resp.iter_lines():
-                if not raw_line:
+            if not chunk:
+                # Stream ended normally
+                logger.info("chat_with_model_stream: remote closed connection after %d tokens", token_count)
+                yield "data: [DONE]\n\n"
+                stream_finished = True
+                return
+
+            buffer += chunk
+            # Process complete SSE lines from buffer
+            while b"\n" in buffer:
+                line_bytes, buffer = buffer.split(b"\n", 1)
+                line = line_bytes.decode("utf-8", errors="replace").strip()
+                if not line:
+                    idle_lines += 1
+                    if idle_lines > idle_limit:
+                        logger.warning("chat_with_model_stream: too many idle lines, breaking")
+                        yield "data: [DONE]\n\n"
+                        stream_finished = True
+                        return
                     continue
-                line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
+                idle_lines = 0
+
                 if line.startswith("data:"):
                     data_str = line[5:].strip()
                     if data_str == "[DONE]":
                         yield "data: [DONE]\n\n"
+                        stream_finished = True
                         return
                     try:
                         parsed = json.loads(data_str)
@@ -1068,13 +1143,56 @@ def chat_with_model_stream(
                             .get("content", "")
                         )
                         if token:
+                            token_count += 1
+                            last_output_time = time.time()
+                            if token_count <= 5:
+                                logger.info("chat_with_model_stream: yielding token %d (%d chars): %s", token_count, len(token), repr(token))
+                                print(f"[DEBUG] chat_with_model_stream: yielding token {token_count} ({len(token)} chars): {repr(token)[:80]}")
                             yield f"data: {json.dumps({'token': token})}\n\n"
                     except json.JSONDecodeError:
                         pass
+
+                # Periodic keepalive: send a comment line to prevent Chrome port timeout
+                # CRITICAL: Chrome extension ports timeout after 30s of inactivity.
+                # SSE comment lines (":\n\n") do NOT trigger onMessage in the content script,
+                # so they do NOT keep the port alive. We must send an actual data line
+                # to keep the port connected during long LLM processing.
+                if time.time() - last_keepalive_time >= keepalive_interval:
+                    yield "data: \n\n"  # Empty data event — triggers onMessage, keeps port alive
+                    last_keepalive_time = time.time()
+                    logger.debug("chat_with_model_stream: sent keepalive data event")
+
+                # Safety: if no data for read_timeout seconds, abort
+                if time.time() - last_output_time > read_timeout:
+                    logger.warning("chat_with_model_stream: no tokens for %.0f seconds, stopping", read_timeout)
+                    yield "data: [DONE]\n\n"
+                    stream_finished = True
+                    return
+    except GeneratorExit:
+        # Client disconnected while iterating the stream.
+        logger.info("chat_with_model_stream: GeneratorExit caught after %d tokens", token_count)
+        print(f"[DEBUG] chat_with_model_stream: GeneratorExit caught after {token_count} tokens")
+        client_disconnected = True
+        raise
     except Exception as exc:
-        logger.warning("Streaming chat failed: %s", exc)
+        logger.warning("chat_with_model_stream: Exception after %d tokens: %s", token_count, exc)
         err_msg = str(exc)
         err_type = "token_overflow" if _is_token_overflow_error(err_msg) else "server_error"
         yield f"data: {json.dumps({'error': err_msg, 'type': err_type})}\n\n"
     finally:
-        yield "data: [DONE]\n\n"
+        # Only yield [DONE] if the stream did not finish normally and the client is still connected.
+        if urlopen:
+            try:
+                urlopen.close()
+            except Exception:
+                pass
+        if not stream_finished and not client_disconnected:
+            logger.info("chat_with_model_stream: yielding [DONE] in finally")
+            print(f"[DEBUG] chat_with_model_stream: yielding [DONE] in finally")
+            yield "data: [DONE]\n\n"
+        elif stream_finished:
+            logger.info("chat_with_model_stream: stream finished normally, %d tokens yielded", token_count)
+            print(f"[DEBUG] chat_with_model_stream: stream finished normally, {token_count} tokens yielded")
+        elif client_disconnected:
+            logger.info("chat_with_model_stream: client disconnected, skipping [DONE]")
+            print(f"[DEBUG] chat_with_model_stream: client disconnected, skipping [DONE]")

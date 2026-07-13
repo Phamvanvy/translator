@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import time
+from collections import OrderedDict
 from typing import Dict, List, Optional
 
 from env_loader import load_dotenv
@@ -102,6 +103,15 @@ def parse_response(response_text: str, count: int) -> List[str]:
     return [trimmed]
 
 
+def _strip_think_tokens(raw: str) -> str:
+    """Remove <think>...</think> reasoning blocks (Qwen3, DeepSeek-R1, etc.)."""
+    cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.S)
+    if "</think>" in cleaned:
+        # Some models emit the closing tag without an opening one.
+        cleaned = cleaned.rsplit("</think>", 1)[-1]
+    return cleaned.strip()
+
+
 def extract_content_from_response(data: dict, endpoint: str) -> str:
     if not data:
         raise ValueError(f"Empty response from {endpoint}")
@@ -116,8 +126,7 @@ def extract_content_from_response(data: dict, endpoint: str) -> str:
         raw = data["text"]
     else:
         raise ValueError(f"Unexpected LMStudio/Qwen response format from {endpoint}: {data}")
-    # Strip Qwen3 / DeepSeek thinking tokens <think>...</think>
-    return re.sub(r"</think>.*?</think>", "", raw, flags=re.S).strip()
+    return _strip_think_tokens(raw)
 
 
 def _try_parse_json_relaxed(text: str):
@@ -195,7 +204,22 @@ def parse_vision_json_response(response_text: str, count: int) -> List[str]:
     return parse_response(response_text, count)
 
 
-TRANSLATION_MEMORY: Dict[str, str] = {}
+TRANSLATION_MEMORY: "OrderedDict[str, str]" = OrderedDict()
+TRANSLATION_MEMORY_MAX = 1000
+
+
+def _memory_get(cache_key: str) -> Optional[str]:
+    if cache_key in TRANSLATION_MEMORY:
+        TRANSLATION_MEMORY.move_to_end(cache_key)
+        return TRANSLATION_MEMORY[cache_key]
+    return None
+
+
+def _memory_set(cache_key: str, value: str) -> None:
+    TRANSLATION_MEMORY[cache_key] = value
+    TRANSLATION_MEMORY.move_to_end(cache_key)
+    while len(TRANSLATION_MEMORY) > TRANSLATION_MEMORY_MAX:
+        TRANSLATION_MEMORY.popitem(last=False)
 
 CJK_RE = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf]')
 
@@ -339,8 +363,9 @@ def translate_text_blocks(
 
     for idx, line in enumerate(lines):
         cache_key = build_cache_key(line, glossary, character_names)
-        if cache_key in TRANSLATION_MEMORY:
-            result[idx] = TRANSLATION_MEMORY[cache_key]
+        cached = _memory_get(cache_key)
+        if cached is not None:
+            result[idx] = cached
         else:
             missing_indices.append(idx)
             missing_lines.append(line)
@@ -437,8 +462,7 @@ def translate_text_blocks(
 
         for idx, translated in zip(missing_indices, translations):
             result[idx] = translated
-            cache_key = build_cache_key(lines[idx], glossary, character_names)
-            TRANSLATION_MEMORY[cache_key] = translated
+            _memory_set(build_cache_key(lines[idx], glossary, character_names), translated)
 
     return result
 
@@ -458,31 +482,202 @@ ASK_VISION_SYSTEM_PROMPT = (
     "      \"question_text\": \"question content\",\n"
     "      \"answer_texts\": [\"correct answer 1\"],\n"
     "      \"answer_boxes\": [[left, top, right, bottom]],\n"
+    "      \"confidence\": 0.9,\n"
     "      \"explanation\": \"why this is correct\"\n"
     "    }\n"
     "  ]\n"
     "}\n"
     "Rules:\n"
     "- answer_boxes[i] is the bounding box of answer_texts[i] in image pixels (0,0 = top-left)\n"
+    "- confidence is 0.0-1.0: how certain you are the chosen answer(s) are correct\n"
     "- Include ALL correct answers for multi-select questions\n"
     "- Return questions as an array even if there is only 1 question\n"
     "- answer_texts and answer_boxes must always be arrays of equal length"
 )
 
+ASK_OCR_REFS_ADDENDUM = (
+    "\nThe user message lists OCR text blocks detected in the image, numbered 1..N.\n"
+    "For each question ALSO return \"answer_refs\": an array of those block numbers,\n"
+    "one per entry of answer_texts (same length and order), where answer_refs[i] is the\n"
+    "block number containing answer_texts[i]. Use null when no block matches that answer."
+)
+
+
+def _normalize_answer_text(s: str) -> str:
+    """Normalize answer text for fuzzy matching (mirrors the extension's normalizeAnswerText)."""
+    s = (s or "").lower().strip()
+    s = re.sub(r"^[a-d][.)]\s*|^\d+[.)]\s*|^[•○◯□☐■◉●*-]\s*", "", s)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip(" .,:;!?")
+
+
+def _bigram_dice(a: str, b: str) -> float:
+    if len(a) < 2 or len(b) < 2:
+        return 1.0 if a == b and a else 0.0
+    bi_a = {a[i:i + 2] for i in range(len(a) - 1)}
+    bi_b = {b[i:i + 2] for i in range(len(b) - 1)}
+    if not bi_a or not bi_b:
+        return 0.0
+    return 2 * len(bi_a & bi_b) / (len(bi_a) + len(bi_b))
+
+
+def _levenshtein_sim(a: str, b: str) -> float:
+    """Normalized Levenshtein similarity in [0, 1]. Inputs capped to 80 chars."""
+    a, b = a[:80], b[:80]
+    if a == b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        curr = [i]
+        for j, cb in enumerate(b, 1):
+            curr.append(min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = curr
+    return 1.0 - prev[-1] / max(len(a), len(b))
+
+
+ANSWER_MATCH_THRESHOLD = 0.6
+
+
+def _answer_match_score(answer_norm: str, block_norm: str) -> float:
+    """Score in [0, 1]: exact > containment > fuzzy (max of bigram Dice and Levenshtein)."""
+    if not answer_norm or not block_norm:
+        return 0.0
+    if answer_norm == block_norm:
+        return 1.0
+    shorter = min(len(answer_norm), len(block_norm))
+    if shorter >= 4 and (answer_norm in block_norm or block_norm in answer_norm):
+        return 0.85
+    return max(_bigram_dice(answer_norm, block_norm), _levenshtein_sim(answer_norm, block_norm))
+
+
+def _box_iou(a: List[int], b: List[int]) -> float:
+    ix = max(0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    if inter <= 0:
+        return 0.0
+    area_a = max(0, a[2] - a[0]) * max(0, a[3] - a[1])
+    area_b = max(0, b[2] - b[0]) * max(0, b[3] - b[1])
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _resolve_answer_boxes(parsed: dict, text_blocks: List[dict], ocr_ran: bool) -> List[dict]:
+    """Resolve each answer to a pixel box, preferring real OCR geometry over LLM-guessed boxes.
+
+    Priority: answer_refs (ocr_id) → fuzzy text match (ocr_matched) → snap LLM box by
+    IoU/proximity (ocr_snapped) → raw LLM box only when OCR did not run (llm).
+    When OCR ran and nothing resolves, the answer is omitted from results entirely.
+    """
+    results: List[dict] = []
+    blocks = text_blocks or []
+    block_norms = [_normalize_answer_text(b.get("text", "")) for b in blocks]
+
+    for q_idx, q in enumerate(parsed.get("questions", [])):
+        answer_texts = q.get("answer_texts") or []
+        refs = q.get("answer_refs") or []
+        llm_boxes = q.get("answer_boxes") or []
+        try:
+            q_conf = float(q.get("confidence"))
+        except (TypeError, ValueError):
+            q_conf = 0.7  # LLM omitted confidence — assume moderate
+        q_conf = min(max(q_conf, 0.0), 1.0)
+
+        for i, text in enumerate(answer_texts):
+            box = None
+            source = None
+            loc_conf = 0.0
+
+            ref = refs[i] if i < len(refs) else None
+            if ref is not None:
+                try:
+                    bid = int(ref)
+                    if 1 <= bid <= len(blocks):
+                        box = blocks[bid - 1]["box"]
+                        source, loc_conf = "ocr_id", 0.95
+                except (TypeError, ValueError):
+                    pass
+
+            if box is None and blocks:
+                answer_norm = _normalize_answer_text(text)
+                best_idx, best_score = -1, 0.0
+                for b_idx, block_norm in enumerate(block_norms):
+                    score = _answer_match_score(answer_norm, block_norm)
+                    if score > best_score:
+                        best_idx, best_score = b_idx, score
+                if best_idx >= 0 and best_score >= ANSWER_MATCH_THRESHOLD:
+                    box = blocks[best_idx]["box"]
+                    source, loc_conf = "ocr_matched", best_score
+
+            llm_box = llm_boxes[i] if i < len(llm_boxes) else None
+            if not (isinstance(llm_box, (list, tuple)) and len(llm_box) == 4):
+                llm_box = None
+            else:
+                try:
+                    llm_box = [int(v) for v in llm_box]
+                except (TypeError, ValueError):
+                    llm_box = None
+
+            if box is None and llm_box and blocks:
+                best_idx, best_iou = -1, 0.0
+                for b_idx, block in enumerate(blocks):
+                    iou = _box_iou(llm_box, block["box"])
+                    if iou > best_iou:
+                        best_idx, best_iou = b_idx, iou
+                if best_idx >= 0 and best_iou > 0:
+                    box = blocks[best_idx]["box"]
+                    source, loc_conf = "ocr_snapped", best_iou
+                else:
+                    # No overlap — snap to nearest block center within 1.5x block height
+                    cx, cy = (llm_box[0] + llm_box[2]) / 2, (llm_box[1] + llm_box[3]) / 2
+                    best_idx, best_dist = -1, float("inf")
+                    for b_idx, block in enumerate(blocks):
+                        bl, bt, br, bb = block["box"]
+                        dist = ((bl + br) / 2 - cx) ** 2 + ((bt + bb) / 2 - cy) ** 2
+                        if dist < best_dist:
+                            best_idx, best_dist = b_idx, dist
+                    if best_idx >= 0:
+                        bl, bt, br, bb = blocks[best_idx]["box"]
+                        if best_dist ** 0.5 <= 1.5 * max(bb - bt, 1):
+                            box = blocks[best_idx]["box"]
+                            source, loc_conf = "ocr_snapped", 0.4
+
+            if box is None and llm_box and not ocr_ran:
+                # LLM-guessed pixels are a last resort, only when no OCR is available
+                box, source, loc_conf = llm_box, "llm", 0.3
+
+            if box is not None:
+                results.append({
+                    "box": [int(v) for v in box],
+                    "text": text,
+                    "is_answer": True,
+                    "question_indices": [q_idx],
+                    "source": source,
+                    "confidence": round(min(loc_conf, q_conf), 3),
+                })
+    return results
+
 
 def ask_question_vision(
     image_data: str,
+    text_blocks: Optional[List[dict]] = None,
     qa_context: Optional[List[dict]] = None,
     llm_url: Optional[str] = None,
     llm_model: Optional[str] = None,
 ) -> dict:
-    """Vision-only ask: sends the image directly to the LLM, no OCR required.
+    """Solve a quiz image with the vision LLM, anchoring answers to OCR boxes when available.
 
-    The LLM reads the text from the image itself and returns the correct
-    answers along with their pixel bounding boxes for auto-click.
+    text_blocks: optional [{"box": [l, t, r, b], "text": str}] from OCR; when present the
+    LLM is asked to reference them by number (answer_refs) and boxes are resolved to real
+    OCR geometry instead of LLM-guessed pixels.
     """
     img_url = image_data if image_data.startswith("data:") else f"data:image/png;base64,{image_data}"
     llm_url, llm_model = _resolve_llm_settings(llm_url, llm_model)
+    ocr_ran = bool(text_blocks)
+
+    system_prompt = ASK_VISION_SYSTEM_PROMPT + (ASK_OCR_REFS_ADDENDUM if ocr_ran else "")
 
     parts: List[str] = []
     if qa_context:
@@ -493,13 +688,18 @@ def ask_question_vision(
             if qa.get("explanation"):
                 parts.append(f"  Reason: {qa['explanation']}")
         parts.append("")
+    if ocr_ran:
+        parts.append(f"OCR text blocks detected in the image ({len(text_blocks)} blocks, numbered 1-based):")
+        for idx, block in enumerate(text_blocks, 1):
+            parts.append(f"  {idx}. \"{block['text']}\"")
+        parts.append("")
     parts.append("Look at the image and return the correct answer(s) with bounding box coordinates. /nothink")
     user_prompt = "\n".join(parts)
 
     payload = {
         "model": llm_model,
         "messages": [
-            {"role": "system", "content": ASK_VISION_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {
                 "role": "user",
                 "content": [
@@ -514,72 +714,54 @@ def ask_question_vision(
     }
 
     endpoint = f"{llm_url}/v1/chat/completions"
-    try:
-        response = requests.post(endpoint, json=payload, timeout=(10, LMSTUDIO_TIMEOUT))
-        if response.status_code == 200:
-            data = response.json()
-            content = extract_content_from_response(data, endpoint)
+    parsed: dict = {"questions": []}
+    last_error: Optional[str] = None
+    for attempt in range(2):
+        try:
+            response = requests.post(endpoint, json=payload, timeout=(10, LMSTUDIO_TIMEOUT))
+            if response.status_code != 200:
+                last_error = f"LLM HTTP {response.status_code}"
+                logger.warning("ask_question_vision attempt %d: %s", attempt + 1, last_error)
+                continue
+            content = extract_content_from_response(response.json(), endpoint)
             logger.info("ask_question_vision raw content (%d chars): %s", len(content), content[:300])
             parsed = _parse_ask_json(content)
             if parsed.get("questions"):
                 logger.info("ask_question_vision: %d question(s) parsed.", len(parsed["questions"]))
-            else:
-                logger.warning("ask_question_vision: LLM response missing questions.")
-        else:
-            logger.warning("ask_question_vision: HTTP %s from LLM.", response.status_code)
-    except Exception as exc:
-        logger.warning("ask_question_vision failed: %s", exc)
+                last_error = None
+                break
+            last_error = "LLM returned no questions"
+            logger.warning("ask_question_vision attempt %d: response missing questions.", attempt + 1)
+        except Exception as exc:
+            last_error = f"LLM request failed: {exc}"
+            logger.warning("ask_question_vision attempt %d failed: %s", attempt + 1, exc)
 
-    # Build results list for auto-click (one entry per answer box)
-    results = []
-    for q_idx, q in enumerate(parsed.get("questions", [])):
-        answer_texts = q.get("answer_texts", [])
-        answer_boxes = q.get("answer_boxes", [])
-        for i, text in enumerate(answer_texts):
-            box = answer_boxes[i] if i < len(answer_boxes) else None
-            if box and len(box) == 4:
-                results.append({
-                    "box": [int(v) for v in box],
-                    "text": text,
-                    "is_answer": True,
-                    "question_indices": [q_idx],
-                })
+    if parsed.get("questions"):
+        status = "ok"
+    elif last_error == "LLM returned no questions":
+        status = "no_questions"
+    else:
+        status = "llm_error"
+
+    results = _resolve_answer_boxes(parsed, text_blocks or [], ocr_ran)
+    if results:
+        source_counts: Dict[str, int] = {}
+        for r in results:
+            source_counts[r["source"]] = source_counts.get(r["source"], 0) + 1
+        logger.info("ask_question_vision box sources: %s", source_counts)
 
     return {
+        "status": status,
+        "error": last_error if status != "ok" else None,
+        "ocr_used": ocr_ran,
         "questions": parsed.get("questions", []),
         "results": results,
     }
 
 
-ASK_SYSTEM_PROMPT = (
-    "You are an assistant for analyzing quiz/test problems.\n"
-    "Look at the image and the numbered text blocks.\n"
-    "One image may contain MULTIPLE QUESTIONS. Analyze ALL questions in the image.\n"
-    "Each question may have MULTIPLE CORRECT ANSWERS (e.g. select all correct answers).\n\n"
-    "Return JSON only (nothing else):\n"
-    "{\n"
-    "  \"questions\": [\n"
-    "    {\n"
-    "      \"question_text\": \"question content (copy verbatim)\",\n"
-    "      \"question_box_ids\": [1],\n"
-    "      \"answer_texts\": [\"correct answer 1\", \"correct answer 2\"],\n"
-    "      \"answer_box_ids\": [3, 5],\n"
-    "      \"explanation\": \"short explanation why this answer is correct\"\n"
-    "    }\n"
-    "  ]\n"
-    "}\n"
-    "Rules:\n"
-    "- If there is only 1 question, still return questions as an array with one element.\n"
-    "- answer_box_ids and answer_texts must be arrays (even if there is only 1 correct answer).\n"
-    "- If a question requires multiple selections, list all correct answers."
-)
-
-
 def _parse_ask_json(text: str) -> dict:
     """Parse LLM ask response. Returns dict with 'questions' list."""
-    trimmed = text.strip()
-    # Strip thinking tokens (Qwen3, DeepSeek-R1, etc.)
-    trimmed = re.sub(r"</think>.*?</think>", "", trimmed, flags=re.S).strip()
+    trimmed = _strip_think_tokens(text.strip())
     # Strip markdown code fences
     trimmed = re.sub(r"^```[a-zA-Z]*\s*", "", trimmed)
     trimmed = re.sub(r"\s*```$", "", trimmed).strip()
@@ -595,155 +777,28 @@ def _parse_ask_json(text: str) -> dict:
 
     # New multi-question format
     if "questions" in data and isinstance(data["questions"], list):
+        for q in data["questions"]:
+            # Alias: some models return answer_box_ids instead of answer_refs
+            if isinstance(q, dict) and not q.get("answer_refs") and q.get("answer_box_ids"):
+                q["answer_refs"] = q["answer_box_ids"]
         return data
 
     # Backward compat: old single-question format → wrap in questions list
-    if "answer_text" in data or "answer_box_ids" in data:
+    if "answer_text" in data or "answer_box_ids" in data or "answer_refs" in data:
         q = {
             "question_text": data.get("question_text", ""),
-            "question_box_ids": data.get("question_box_ids", []),
             "answer_texts": (
                 [data["answer_text"]] if isinstance(data.get("answer_text"), str)
                 else data.get("answer_texts", [])
             ),
-            "answer_box_ids": data.get("answer_box_ids", []),
+            "answer_refs": data.get("answer_refs") or data.get("answer_box_ids", []),
+            "answer_boxes": data.get("answer_boxes", []),
+            "confidence": data.get("confidence"),
             "explanation": data.get("explanation", ""),
         }
         return {"questions": [q]}
 
     return {"questions": []}
-
-
-def ask_question(
-    image_data: str,
-    text_blocks: List[dict],
-    qa_context: Optional[List[dict]] = None,
-    llm_url: Optional[str] = None,
-    llm_model: Optional[str] = None,
-) -> dict:
-    """Use vision LLM to identify the correct answer in a quiz/survey image.
-
-    Args:
-        image_data: base64 data URL of the scanned image region.
-        text_blocks: list of {"box": [l, t, r, b], "text": "..."} from OCR.
-        qa_context: optional list of relevant Q&A pairs for context.
-
-    Returns:
-        {
-            "question_text": str,
-            "answer_text": str,
-            "explanation": str,
-            "results": [{"box", "text", "box_id", "is_answer"}, ...],
-        }
-    """
-    if not text_blocks:
-        return {"question_text": "", "answer_text": "", "explanation": "", "results": []}
-
-    parts: List[str] = []
-
-    if qa_context:
-        parts.append("Refer to similar questions in the knowledge base:")
-        for qa in qa_context:
-            parts.append(f"  Q: {qa.get('question', '')}")
-            parts.append(f"  A: {qa.get('answer', '')}")
-            if qa.get("explanation"):
-                parts.append(f"  Reason: {qa['explanation']}")
-        parts.append("")
-
-    parts.append(f"There are {len(text_blocks)} text blocks detected in the image (numbered 1-based):")
-    for idx, block in enumerate(text_blocks, 1):
-        parts.append(f"  {idx}. \"{block['text']}\"")
-
-    parts.append(
-        "\nBased on the image and the list above, determine the MOST CORRECT question and answer. "
-        "Return JSON in the format described in the system prompt."
-    )
-    user_prompt = "\n".join(parts)
-
-    img_url = image_data if image_data.startswith("data:") else f"data:image/png;base64,{image_data}"
-
-    llm_url, llm_model = _resolve_llm_settings(llm_url, llm_model)
-    vision_payload = {
-        "model": llm_model,
-        "messages": [
-            {"role": "system", "content": ASK_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": img_url}},
-                    {"type": "text", "text": user_prompt},
-                ],
-            },
-        ],
-        "temperature": 0.1,
-        "max_tokens": 32768,
-        "top_p": 0.9,
-    }
-
-    # Text-only fallback payload (for non-vision models)
-    text_payload = {
-        "model": llm_model,
-        "messages": [
-            {"role": "system", "content": ASK_SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": 0.1,
-        "max_tokens": 32768,
-        "top_p": 0.9,
-    }
-
-    parsed: dict = {"questions": []}
-    endpoint = f"{llm_url}/v1/chat/completions"
-
-    for payload in (vision_payload, text_payload):
-        try:
-            response = requests.post(endpoint, json=payload, timeout=(10, LMSTUDIO_TIMEOUT))
-            if response.status_code >= 400:
-                logger.warning("Ask LLM returned HTTP %s, trying text fallback.", response.status_code)
-                continue
-            data = response.json()
-            content = extract_content_from_response(data, endpoint)
-            parsed = _parse_ask_json(content)
-            if parsed.get("questions"):
-                total_answers = sum(len(q.get("answer_box_ids", [])) for q in parsed["questions"])
-                logger.info(
-                    "Ask question parsed: %d question(s), %d answer(s) total.",
-                    len(parsed["questions"]),
-                    total_answers,
-                )
-                break
-            logger.warning("Ask LLM response missing questions, trying text fallback.")
-        except Exception as exc:
-            logger.warning("Ask LLM call failed (%s), trying text fallback.", exc)
-
-    # Build flat set of all answer box ids across all questions
-    all_answer_ids: set = set()
-    # Map box_id -> list of question indices that consider it an answer
-    box_question_map: dict = {}
-    for q_idx, q in enumerate(parsed.get("questions", [])):
-        for raw_id in q.get("answer_box_ids", []):
-            try:
-                bid = int(raw_id)
-                all_answer_ids.add(bid)
-                box_question_map.setdefault(bid, []).append(q_idx)
-            except (ValueError, TypeError):
-                pass
-
-    results = [
-        {
-            "box": block["box"],
-            "text": block["text"],
-            "box_id": idx,
-            "is_answer": idx in all_answer_ids,
-            "question_indices": box_question_map.get(idx, []),
-        }
-        for idx, block in enumerate(text_blocks, 1)
-    ]
-
-    return {
-        "questions": parsed.get("questions", []),
-        "results": results,
-    }
 
 
 # ──────────────────────────────────────────────────────────────────────────────

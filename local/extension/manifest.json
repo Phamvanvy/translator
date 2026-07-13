@@ -40,14 +40,8 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content.js", "content-scan.js", "content-chat.js"],
+      "js": ["content.js", "content-click.js", "content-scan.js", "content-chat.js"],
       "run_at": "document_idle"
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": ["overlay.css"],
-      "matches": ["<all_urls>"]
     }
   ]
 }

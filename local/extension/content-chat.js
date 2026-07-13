@@ -284,50 +284,96 @@ async function sendChatMessage(userText) {
   }
 }
 
-// ── Auto-click answer boxes ───────────────────────────────────────────────────
+// ── Auto-click answers (hybrid: DOM text match → OCR box fallback) ───────────
 
-function showAutoClickFlash(screenX, screenY) {
-  if (!shadowRoot) return;
-  const SIZE = 36;
-  const el = document.createElement("div");
-  el.className = "auto-click-flash";
-  el.style.cssText = `left:${Math.round(screenX - SIZE / 2)}px;top:${Math.round(screenY - SIZE / 2)}px;width:${SIZE}px;height:${SIZE}px;`;
-  // Flash must live outside shadow DOM to overlay any element on page
-  document.documentElement.appendChild(el);
-  el.addEventListener("animationend", () => el.remove(), { once: true });
-}
+const AUTO_CLICK_MIN_CONFIDENCE = 0.5;
 
-function autoClickAnswers(results, rect) {
-  if (!results || !rect) return;
-  const answers = results.filter(r => r.is_answer);
-  if (answers.length === 0) return;
-  answers.forEach((r, i) => {
-    const [left, top, right, bottom] = r.box;
-    const screenX = rect.left + (left + right) / 2;
-    const screenY = rect.top + (top + bottom) / 2;
-    setTimeout(() => {
-      showAutoClickFlash(screenX, screenY);
+function autoClickAnswers(result, rect, scrollAnchor) {
+  if (!result || !rect) return;
+  const questions = result.questions || [];
+  const results = result.results || [];
+  if (questions.length === 0 && results.length === 0) return;
+
+  // The page may have scrolled while the LLM was thinking — shift the region back
+  const dx = scrollAnchor ? scrollAnchor.x - window.scrollX : 0;
+  const dy = scrollAnchor ? scrollAnchor.y - window.scrollY : 0;
+  const adjRect = { left: rect.left + dx, top: rect.top + dy, width: rect.width, height: rect.height };
+
+  const candidates = collectCandidates(adjRect);
+  const answered = new Set();
+  const clickedRadioGroups = new Set();
+  const usedResults = new Set();
+  let matched = 0, boxClicked = 0, lowConf = 0, missed = 0;
+  let delay = 0;
+
+  questions.forEach((q, qi) => {
+    const qConf = typeof q.confidence === "number" ? q.confidence : 0.7;
+    (q.answer_texts || []).forEach(answerText => {
+      const normAnswer = normalizeAnswerText(answerText);
+      let rIdx = results.findIndex((r, idx) =>
+        !usedResults.has(idx) && (r.question_indices || []).includes(qi) &&
+        normalizeAnswerText(r.text) === normAnswer);
+      if (rIdx < 0) rIdx = results.findIndex((r, idx) => !usedResults.has(idx) && (r.question_indices || []).includes(qi));
+      const rEntry = rIdx >= 0 ? results[rIdx] : null;
+      if (rIdx >= 0) usedResults.add(rIdx);
+
+      if (qConf < AUTO_CLICK_MIN_CONFIDENCE) { lowConf++; return; }
+
+      const expectedCenter = rEntry ? {
+        x: adjRect.left + (rEntry.box[0] + rEntry.box[2]) / 2,
+        y: adjRect.top + (rEntry.box[1] + rEntry.box[3]) / 2,
+      } : null;
+
       setTimeout(() => {
-        const target = document.elementFromPoint(screenX, screenY);
-        if (target && target !== document.documentElement && target !== document.body) {
-          target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, clientX: screenX, clientY: screenY }));
-          target.dispatchEvent(new MouseEvent("mouseup",   { bubbles: true, cancelable: true, clientX: screenX, clientY: screenY }));
-          target.dispatchEvent(new MouseEvent("click",     { bubbles: true, cancelable: true, clientX: screenX, clientY: screenY }));
+        const el = findAnswerElement(answerText, candidates, answered, expectedCenter);
+        if (el) {
+          const actionable = resolveActionable(el) || el;
+          const radio = actionable.matches && actionable.matches('input[type="radio"]') ? actionable
+            : (actionable.querySelector ? actionable.querySelector('input[type="radio"]') : null);
+          if (radio && radio.name && clickedRadioGroups.has(radio.name)) {
+            missed++; // multi-answer output on a single-select group — don't fight it
+            return;
+          }
+          const r = el.getBoundingClientRect();
+          const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+          showAutoClickFlash(cx, cy);
+          simulateClick(el, cx, cy);
+          answered.add(el);
+          answered.add(actionable);
+          if (radio && radio.name) clickedRadioGroups.add(radio.name);
+          matched++;
+        } else if (expectedCenter && rEntry &&
+                   (typeof rEntry.confidence !== "number" || rEntry.confidence >= AUTO_CLICK_MIN_CONFIDENCE)) {
+          const clicked = simulateClickAt(expectedCenter.x, expectedCenter.y);
+          if (clicked) { answered.add(clicked); boxClicked++; } else missed++;
+        } else {
+          missed++;
         }
-      }, 220);
-    }, i * 400);
+      }, delay);
+      delay += 350;
+    });
   });
+
+  setTimeout(() => {
+    const parts = [`${matched} matched`];
+    if (boxClicked) parts.push(`${boxClicked} by box`);
+    if (lowConf) parts.push(`${lowConf} skipped (low confidence)`);
+    if (missed) parts.push(`${missed} not found`);
+    setStatus(`Auto-click: ${parts.join(", ")}`);
+  }, delay + 300);
 }
 
 // ── Ask / Quiz result display ─────────────────────────────────────────────────
 
-async function sendToServerAsk(dataUrl, rect) {
+async function sendToServerAsk(dataUrl, rect, { allowAutoClick = true } = {}) {
   try {
     setStatus("Analyzing question...");
+    const scrollAnchor = { x: window.scrollX, y: window.scrollY };
     const payload = {
       image: dataUrl,
       lang: ocrLang,
       domain_id: getDomainId(),
+      want_boxes: autoClickAnswer && allowAutoClick,
     };
     const llmUrl = localStorage.getItem("autoScanLLMUrl") || "";
     const llmModel = localStorage.getItem("autoScanLLMModel") || "";
@@ -345,13 +391,23 @@ async function sendToServerAsk(dataUrl, rect) {
     });
 
     switchTab("chat");
+
+    if (result.status === "llm_error") {
+      setStatus(`Ask failed: ${result.error || "LLM error"}`, true);
+      appendChatMessage("bot", `<em>❌ Ask failed: ${_escapeHtml(result.error || "LLM error")}</em>`);
+      return;
+    }
     const questions = result.questions || [];
+    if (result.status === "no_questions" || questions.length === 0) {
+      setStatus("No questions detected in the scan.", true);
+      return;
+    }
     const totalAnswers = questions.reduce((s, q) => s + (q.answer_texts || []).length, 0);
     setStatus(`✅ ${questions.length} questions, ${totalAnswers} answers`);
 
-    // Auto-click correct answer boxes on the page if enabled
-    if (autoClickAnswer && result.results) {
-      autoClickAnswers(result.results, rect);
+    // Auto-click correct answers on the page if enabled (never for uploaded images)
+    if (autoClickAnswer && allowAutoClick) {
+      autoClickAnswers(result, rect, scrollAnchor);
     }
 
     lastAskContext = questions.map((q, i) => {
@@ -370,6 +426,9 @@ async function sendToServerAsk(dataUrl, rect) {
         html += `<div class="chat-a-label">✅ Answer</div><div class="chat-a-list">`;
         answerTexts.forEach(a => { html += `<div class="chat-a-item" style="color:${color};border-color:${color}">${_escapeHtml(a)}</div>`; });
         html += `</div>`;
+        if (typeof q.confidence === "number" && q.confidence < AUTO_CLICK_MIN_CONFIDENCE) {
+          html += `<div class="chat-exp-text" style="color:#fbbf24">⚠ Độ tin cậy thấp (${Math.round(q.confidence * 100)}%) — không auto-click</div>`;
+        }
         if (q.explanation) html += `<div class="chat-exp-label">💡 Explanation</div><div class="chat-exp-text">${_escapeHtml(q.explanation)}</div>`;
       });
       appendChatMessage("bot", html);
@@ -395,7 +454,8 @@ function onUploadAskClicked() {
       const rect = { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
       switchTab("chat");
       appendChatMessage("bot", `<em>📤 Analyzing image: ${_escapeHtml(file.name)}...</em>`);
-      await sendToServerAsk(dataUrl, rect);
+      // Uploaded images are unrelated to the live page — never auto-click from them
+      await sendToServerAsk(dataUrl, rect, { allowAutoClick: false });
     };
     reader.readAsDataURL(file);
   });

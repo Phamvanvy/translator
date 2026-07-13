@@ -14,8 +14,8 @@ from typing import Dict, List, Optional
 
 from glossary_store import get_glossary, update_glossary
 from ocr import decode_image, merge_text_lines, ocr_image, inpaint_text_regions
-from qa_store import add_qa_entry, get_all_qa, remove_qa_entry
-from translate import agent_step, ask_question, ask_question_vision, chat_with_model, chat_with_model_stream, translate_text_blocks, translate_with_vision
+from qa_store import add_qa_entry, find_relevant_qa, get_all_qa, remove_qa_entry
+from translate import agent_step, ask_question_vision, chat_with_model, chat_with_model_stream, translate_text_blocks, translate_with_vision
 
 # SSE timeout in seconds — must exceed worst-case LLM response time
 SSE_TIMEOUT = int(os.environ.get("SSE_TIMEOUT", "300"))
@@ -80,6 +80,7 @@ class AskRequest(BaseModel):
     domain_id: Optional[str] = None
     llm_url: Optional[str] = None
     llm_model: Optional[str] = None
+    want_boxes: bool = False  # run OCR so answers get real pixel boxes for auto-click
 
 
 class QAEntryRequest(BaseModel):
@@ -207,13 +208,27 @@ def api_translate_image(request: ImageTranslateRequest):
 def api_ask(request: AskRequest):
     """Scan an image containing a quiz/survey question and return the correct answer.
 
-    Uses vision-only mode: the LLM reads the image directly without OCR,
-    so PaddleOCR models are not loaded at all for this endpoint.
+    OCR runs when the client wants clickable boxes (want_boxes) or when the QA
+    knowledge base has entries to match against; otherwise vision-only.
     """
     try:
+        text_blocks = None
+        qa_context = None
+        use_ocr = request.want_boxes or bool(get_all_qa())
+        if use_ocr:
+            try:
+                image = decode_image(request.image)
+                text_blocks = merge_text_lines(ocr_image(image, lang=request.lang)) or None
+            except Exception:
+                logger.exception("Ask OCR failed — continuing vision-only")
+            if text_blocks:
+                joined = " ".join(b["text"] for b in text_blocks)
+                qa_context = find_relevant_qa(joined) or None
+
         result = ask_question_vision(
             request.image,
-            qa_context=None,
+            text_blocks=text_blocks,
+            qa_context=qa_context,
             llm_url=request.llm_url,
             llm_model=request.llm_model,
         )

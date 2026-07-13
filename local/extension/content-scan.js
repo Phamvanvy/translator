@@ -613,12 +613,7 @@ async function runAgentLoop(task) {
         appendChatMessage("bot", `<em>🖱 Click (${x}, ${y})${reason}</em>`);
         showAutoClickFlash(x, y);
         await new Promise(r => setTimeout(r, 80));
-        const target = document.elementFromPoint(x, y);
-        if (target && target !== document.documentElement && target !== document.body) {
-          target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, clientX: x, clientY: y }));
-          target.dispatchEvent(new MouseEvent("mouseup",   { bubbles: true, cancelable: true, clientX: x, clientY: y }));
-          target.dispatchEvent(new MouseEvent("click",     { bubbles: true, cancelable: true, clientX: x, clientY: y }));
-        }
+        simulateClickAt(x, y, { flash: false });
         await new Promise(r => setTimeout(r, 500));
         continue;
       }

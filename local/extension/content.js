@@ -105,8 +105,10 @@ function createUI() {
     #tab-chat { padding: 0; }
     .chat-header { display:flex; align-items:center; justify-content:space-between; padding:6px 10px 5px; border-bottom:1px solid rgba(255,255,255,0.07); flex-shrink:0; }
     .chat-header-title { font-size:10px; color:#475569; font-weight:600; text-transform:uppercase; letter-spacing:.06em; }
-    .chat-clear-btn { background:rgba(255,255,255,0.06) !important; border:1px solid rgba(255,255,255,0.1) !important; border-radius:7px !important; color:#64748b !important; font-size:12px !important; padding:3px 7px !important; cursor:pointer; transition:all .2s; width:auto !important; margin:0 !important; }
+    .chat-clear-btn, .chat-export-btn { background:rgba(255,255,255,0.06) !important; border:1px solid rgba(255,255,255,0.1) !important; border-radius:7px !important; color:#64748b !important; font-size:12px !important; padding:3px 7px !important; cursor:pointer; transition:all .2s; width:auto !important; margin:0 !important; }
     .chat-clear-btn:hover { background:rgba(239,68,68,0.2) !important; border-color:rgba(239,68,68,0.4) !important; color:#f87171 !important; }
+    .chat-export-btn:hover { background:rgba(56,189,248,0.2) !important; border-color:rgba(56,189,248,0.4) !important; color:#38bdf8 !important; }
+    .chat-header-actions { display:flex; align-items:center; gap:6px; }
     .chat-area { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding: 10px; scroll-behavior: smooth; min-height: 0; }
     .chat-msg { padding: 9px 11px; border-radius: 12px; font-size: 12.5px; line-height: 1.55; word-break: break-word; }
     .chat-msg.bot { background: rgba(56,189,248,0.1); border: 1px solid rgba(56,189,248,0.2); color: #e2e8f0; align-self: flex-start; width: 100%; box-sizing: border-box; }
@@ -189,7 +191,10 @@ function createUI() {
       <div class="menu-tab-pane" id="tab-chat">
         <div class="chat-header">
           <span class="chat-header-title">History</span>
-          <button class="chat-clear-btn" id="chat-clear" title="Clear all chat history">&#128465; Clear</button>
+          <div class="chat-header-actions">
+            <button class="chat-export-btn" id="chat-export" title="Export chat text + images to Word (.doc)">&#128196; Xuất Word</button>
+            <button class="chat-clear-btn" id="chat-clear" title="Clear all chat history">&#128465; Clear</button>
+          </div>
         </div>
         <div class="chat-area" id="chat-area"></div>
         <div class="chat-attach-bar" id="chat-attach-bar"></div>
@@ -258,6 +263,7 @@ function createUI() {
   shadow.getElementById("btn-qa").addEventListener("click", onQAClicked);
   shadow.getElementById("btn-upload-ask").addEventListener("click", () => onUploadAskClicked());
   shadow.getElementById("chat-clear").addEventListener("click", () => clearChat());
+  shadow.getElementById("chat-export").addEventListener("click", () => exportChatToWord());
 
   // --- Chat input wiring ---
   const chatInput     = shadow.getElementById("chat-input");

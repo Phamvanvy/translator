@@ -108,6 +108,51 @@ function clearChat() {
   if (area) area.innerHTML = "";
 }
 
+// ── Export chat (text + images) to a Word-openable .doc ───────────────────────
+
+function exportChatToWord() {
+  const area = getChatArea();
+  if (!area || !area.children.length) {
+    setStatus("Không có nội dung chat để xuất.", true);
+    return;
+  }
+
+  const style = `
+    body { font-family: Calibri, Arial, sans-serif; font-size: 14px; color:#1e293b; }
+    h2 { font-size: 18px; margin-bottom: 16px; }
+    .chat-msg { margin-bottom: 14px; padding: 10px 12px; border-radius: 8px; border: 1px solid #e2e8f0; }
+    .chat-msg.user { background:#e0f2fe; }
+    .chat-msg.bot { background:#f8fafc; }
+    img { max-width: 480px; display:block; margin: 6px 0; }
+    .chat-q-label, .chat-a-label, .chat-exp-label { font-weight:bold; margin-top:6px; display:block; }
+    .chat-a-item { display:block; margin: 2px 0; }
+    button { display:none; }
+  `;
+  const html = `<!DOCTYPE html>
+<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
+<head>
+<meta charset="utf-8">
+<title>AI Chat Export</title>
+<!--[if gte mso 9]><xml><w:WordDocument><w:View>Print</w:View><w:Zoom>100</w:Zoom><w:DoNotOptimizeForBrowser/></w:WordDocument></xml><![endif]-->
+<style>${style}</style>
+</head>
+<body>
+<h2>AI Chat Export — ${new Date().toLocaleString("vi-VN")}</h2>
+${area.innerHTML}
+</body>
+</html>`;
+
+  const blob = new Blob(["﻿", html], { type: "application/msword" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `ai-chat-${Date.now()}.doc`;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 5000);
+  setStatus("Đã xuất chat sang Word (kèm ảnh).");
+}
+
 // ── Chat helpers ──────────────────────────────────────────────────────────────
 
 function getChatArea() {

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Manga AutoScan Translator (Browser)",
-  "version": "0.1.0",
-  "description": "Auto-scan manga images and translate in-browser with LMStudio, using local OCR for text extraction.",
+  "name": "Manga AutoScan Translator (Cloud)",
+  "version": "0.2.0",
+  "description": "Scan manga/quiz pages and translate or auto-answer using a cloud vision LLM — no local server, no bundled OCR.",
   "permissions": ["activeTab", "scripting", "tabs", "storage", "commands"],
   "host_permissions": ["<all_urls>"],
   "background": {
@@ -40,13 +40,13 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["tesseract/tesseract.min.js", "content.js"],
+      "js": ["llm.js", "content.js", "content-click.js", "content-scan.js", "content-chat.js"],
       "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["overlay.css", "tesseract/worker.min.js", "tesseract/tesseract-core.wasm.js", "tesseract/tesseract-core.wasm", "tesseract/chi_sim.traineddata", "tesseract/eng.traineddata", "tesseract/jpn.traineddata"],
+      "resources": ["icon.svg"],
       "matches": ["<all_urls>"]
     }
   ]
